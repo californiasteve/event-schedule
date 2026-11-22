@@ -929,7 +929,7 @@ if (!empty($_GET['csched_map'])) {
             <button type="submit" class="button button-secondary"><?php echo esc_html__('Import Workshops CSV', 'convention-schedule'); ?></button>
             <label style="flex-basis:100%;"><input type="checkbox" name="csched_review_columns" value="1"> <?php echo esc_html__('Let me review how columns are matched before importing', 'convention-schedule'); ?></label>
         </form>
-        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Schedules and categories are created if missing. If your file\'s column names don\'t match, you\'ll be asked which field each column goes into before anything is imported.', 'convention-schedule'); ?></p>
+        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Schedules and categories are created if missing. If your file\'s column names don\'t match, you\'ll be asked which field each column goes into before anything is imported. If the file has no schedule column, you\'ll choose an existing schedule or create a new one.', 'convention-schedule'); ?></p>
     </div>
 </div>
 
@@ -1223,18 +1223,28 @@ public static function handle_import_workshops_csv(): void {
     $header = $rows[0];
 
     $force_review = !empty($_POST['csched_review_columns']);
-    $map = $force_review ? null : self::exact_column_map($header);
-    if ($map !== null) {
-        self::redirect_import_done(self::run_import(array_slice($rows, 1), $map));
+    $exact = self::exact_column_map($header);
+    $exact_has_schedule = $exact !== null && (isset($exact['schedule']) || isset($exact['event']));
+    if (!$force_review && $exact_has_schedule) {
+        self::redirect_import_done(self::run_import(array_slice($rows, 1), $exact));
     }
 
-    // Needs matching: keep the parsed file for this user for one hour.
-    $token = wp_generate_password(16, false, false);
-    set_transient(self::import_transient_key($token), [
+    // Needs the matching screen (columns don't match, no schedule column, or review requested).
+    // Keep the parsed file for this user for one hour.
+    $data = [
         'rows' => $rows,
         'filename' => sanitize_file_name((string)($file['name'] ?? 'import.csv')),
         'delimiter' => $delim,
-    ], HOUR_IN_SECONDS);
+        'reason' => $exact !== null ? ($exact_has_schedule ? 'review' : 'no_schedule') : 'mismatch',
+    ];
+    if ($exact !== null) {
+        // Headers already match: pre-fill the screen with them (legacy "event" -> schedule).
+        $chosen = array_fill(0, count($header), '');
+        foreach ($exact as $field => $i) $chosen[$i] = $field === 'event' ? (isset($exact['schedule']) ? '' : 'schedule') : $field;
+        $data['chosen'] = $chosen;
+    }
+    $token = wp_generate_password(16, false, false);
+    set_transient(self::import_transient_key($token), $data, HOUR_IN_SECONDS);
 
     wp_safe_redirect(self::settings_url(['csched_map' => $token]));
     exit;
@@ -1265,20 +1275,59 @@ public static function handle_import_workshops_csv_mapped(): void {
         $map[$field] = (int)$i;
     }
 
+    // No column holds the schedule: the user picks one schedule for all rows (or a new one).
+    $target = isset($_POST['csched_target_schedule']) ? sanitize_text_field(wp_unslash((string)$_POST['csched_target_schedule'])) : '';
+    $new_name = isset($_POST['csched_new_schedule']) ? sanitize_text_field(wp_unslash((string)$_POST['csched_new_schedule'])) : '';
+    $default_schedule = '';
+
     $error = '';
     if (!isset($map['title'])) $error = 'no_title';
     elseif (!empty($dupes)) $error = 'duplicate';
+    elseif (!isset($map['schedule'])) {
+        if ($target === '') {
+            $error = 'no_schedule';
+        } elseif ($target === '__new__') {
+            if ($new_name === '' || sanitize_title($new_name) === '') {
+                $error = 'no_schedule_name';
+            } else {
+                $default_schedule = self::find_or_create_schedule($new_name);
+                if ($default_schedule === '') $error = 'no_schedule_name';
+            }
+        } elseif ($target !== '__none__') {
+            $term = get_term_by('slug', sanitize_title($target), CS_Plugin::SCHEDULE_TAX);
+            if ($term) $default_schedule = (string)$term->slug; else $error = 'no_schedule';
+        }
+    }
 
     if ($error !== '') {
         // Keep the choices so the screen re-opens as the user left it.
         $data['chosen'] = $chosen;
+        $data['target'] = $target;
+        $data['new_name'] = $new_name;
         set_transient(self::import_transient_key($token), $data, HOUR_IN_SECONDS);
         wp_safe_redirect(self::settings_url(['csched_map' => $token, 'csched_map_error' => $error]));
         exit;
     }
 
     delete_transient(self::import_transient_key($token));
-    self::redirect_import_done(self::run_import(array_slice($data['rows'], 1), $map));
+    self::redirect_import_done(self::run_import(array_slice($data['rows'], 1), $map, $default_schedule));
+}
+
+/** Return the slug of the schedule with this name (or slug), creating it if needed. '' on failure. */
+private static function find_or_create_schedule(string $name): string {
+    $slug = sanitize_title($name);
+    if ($slug === '') return '';
+    $term = get_term_by('slug', $slug, CS_Plugin::SCHEDULE_TAX);
+    if (!$term) $term = get_term_by('name', $name, CS_Plugin::SCHEDULE_TAX);
+    if ($term) return (string)$term->slug;
+    $created = wp_insert_term($name, CS_Plugin::SCHEDULE_TAX, ['slug' => $slug]);
+    if (is_wp_error($created)) {
+        $existing = $created->get_error_data('term_exists');
+        $term = $existing ? get_term((int)$existing, CS_Plugin::SCHEDULE_TAX) : null;
+        return ($term && !is_wp_error($term)) ? (string)$term->slug : '';
+    }
+    $term = get_term((int)$created['term_id'], CS_Plugin::SCHEDULE_TAX);
+    return ($term && !is_wp_error($term)) ? (string)$term->slug : '';
 }
 
 /** The column-matching screen (shown on the Settings page when ?csched_map= is present). */
@@ -1294,7 +1343,19 @@ private static function render_import_mapping_screen(string $token): bool {
     $chosen = (isset($data['chosen']) && is_array($data['chosen'])) ? $data['chosen'] : self::guess_column_map($header);
     $err = isset($_GET['csched_map_error']) ? sanitize_key((string)$_GET['csched_map_error']) : '';
     ?>
-    <h2><?php echo esc_html__('Match CSV Columns', 'convention-schedule'); ?></h2>
+    <?php
+    $reason = (string)($data['reason'] ?? 'mismatch');
+    $target = (string)($data['target'] ?? '');
+    $new_name = (string)($data['new_name'] ?? '');
+    $schedule_terms = get_terms(['taxonomy' => CS_Plugin::SCHEDULE_TAX, 'hide_empty' => false]);
+    if (is_wp_error($schedule_terms)) $schedule_terms = [];
+    // With no schedules yet, "new schedule" is the natural default.
+    if ($target === '' && empty($schedule_terms)) $target = '__new__';
+    ?>
+    <h2><?php echo esc_html($reason === 'no_schedule' ? __('Choose a Schedule for This Import', 'convention-schedule') : __('Match CSV Columns', 'convention-schedule')); ?></h2>
+    <?php if ($reason === 'no_schedule'): ?>
+        <p style="max-width:820px;"><strong><?php echo esc_html__('Your file has no Schedule column. Choose the schedule these workshops belong to below. The columns have already been matched.', 'convention-schedule'); ?></strong></p>
+    <?php endif; ?>
     <p style="max-width:820px;">
         <?php echo esc_html(sprintf(
             /* translators: 1: file name, 2: number of rows */
@@ -1304,6 +1365,10 @@ private static function render_import_mapping_screen(string $token): bool {
     </p>
     <?php if ($err === 'no_title'): ?>
         <div class="notice notice-error inline"><p><?php echo esc_html__('Choose the column that holds the workshop title. Title is required.', 'convention-schedule'); ?></p></div>
+    <?php elseif ($err === 'no_schedule'): ?>
+        <div class="notice notice-error inline"><p><?php echo esc_html__('Choose a schedule for these workshops, create a new one, or pick "Don\'t assign a schedule".', 'convention-schedule'); ?></p></div>
+    <?php elseif ($err === 'no_schedule_name'): ?>
+        <div class="notice notice-error inline"><p><?php echo esc_html__('Enter a name for the new schedule.', 'convention-schedule'); ?></p></div>
     <?php elseif ($err === 'duplicate'): ?>
         <div class="notice notice-error inline"><p><?php echo esc_html__('Each field can only be used once. Two or more columns are set to the same field.', 'convention-schedule'); ?></p></div>
     <?php endif; ?>
@@ -1343,6 +1408,48 @@ private static function render_import_mapping_screen(string $token): bool {
             <?php endforeach; ?>
             </tbody>
         </table>
+
+        <div id="csched-schedule-pick" style="max-width:1100px;margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #c3c4c7;border-left:4px solid #2271b1;">
+            <h3 style="margin:0 0 6px;"><?php echo esc_html__('Schedule for these workshops', 'convention-schedule'); ?></h3>
+            <p style="margin:0 0 10px;"><?php echo esc_html__('No column is set to Schedule, so choose which schedule every workshop in this file goes into.', 'convention-schedule'); ?></p>
+            <fieldset>
+                <?php foreach ($schedule_terms as $t): ?>
+                    <label style="display:block;margin:0 0 6px;">
+                        <input type="radio" name="csched_target_schedule" value="<?php echo esc_attr($t->slug); ?>" <?php checked($target, $t->slug); ?>>
+                        <?php echo esc_html($t->name); ?>
+                        <span style="color:#646970;">(<?php echo esc_html(sprintf(_n('%d workshop', '%d workshops', (int)$t->count, 'convention-schedule'), (int)$t->count)); ?>)</span>
+                    </label>
+                <?php endforeach; ?>
+                <label style="display:block;margin:0 0 6px;">
+                    <input type="radio" name="csched_target_schedule" value="__new__" <?php checked($target, '__new__'); ?>>
+                    <?php echo esc_html__('New schedule:', 'convention-schedule'); ?>
+                    <input type="text" name="csched_new_schedule" value="<?php echo esc_attr($new_name); ?>" placeholder="<?php echo esc_attr__('e.g. 2027 Convention', 'convention-schedule'); ?>" class="regular-text" style="margin-left:4px;">
+                </label>
+                <label style="display:block;margin:0;color:#646970;">
+                    <input type="radio" name="csched_target_schedule" value="__none__" <?php checked($target, '__none__'); ?>>
+                    <?php echo esc_html__('Don\'t assign a schedule (updated workshops keep the schedule they have)', 'convention-schedule'); ?>
+                </label>
+            </fieldset>
+        </div>
+        <script>
+        (function(){
+            var box = document.getElementById('csched-schedule-pick');
+            if (!box) return;
+            var form = box.closest('form');
+            function sync(){
+                var mapped = Array.prototype.some.call(form.querySelectorAll('select[name^="csched_col["]'), function(s){ return s.value === 'schedule'; });
+                box.style.display = mapped ? 'none' : '';
+            }
+            form.addEventListener('change', function(e){
+                if (e.target.name && e.target.name.indexOf('csched_col[') === 0) sync();
+            });
+            // Typing a new name selects the "New schedule" option.
+            var nameInput = box.querySelector('input[name="csched_new_schedule"]');
+            nameInput.addEventListener('input', function(){ box.querySelector('input[value="__new__"]').checked = true; });
+            sync();
+        })();
+        </script>
+
         <p class="description" style="max-width:820px;">
             <?php echo esc_html__('Columns set to "Don\'t import" are ignored. When a Workshop ID matches an existing workshop, that workshop is updated and fields you don\'t import are left as they are. Dates and times can be in most common formats, such as 2026-05-01, 5/1/2026, 14:00 or 2:00 PM.', 'convention-schedule'); ?>
         </p>
@@ -1377,7 +1484,7 @@ private static function split_time_range(string $v): array {
  * Import data rows using a field => column index map.
  * @return array{created:int, updated:int, skipped:int}
  */
-private static function run_import(array $rows, array $col_index): array {
+private static function run_import(array $rows, array $col_index, string $default_schedule = ''): array {
     $created = 0;
     $updated = 0;
     $skipped = 0;
@@ -1419,6 +1526,12 @@ private static function run_import(array $rows, array $col_index): array {
         $schedule_raw = trim($get('schedule'));
         if ($schedule_raw === '') $schedule_raw = trim($get('event'));
         $schedule_slug = sanitize_title($schedule_raw);
+        if (!$has_schedule_col && $default_schedule !== '') {
+            // Schedule chosen on the import screen applies to every row.
+            $has_schedule_col = true;
+            $schedule_raw = $default_schedule;
+            $schedule_slug = $default_schedule;
+        }
         $has_previous_day_col = $has('previous_day');
         $previous_day = trim($get('previous_day'));
         $previous_day = in_array(strtolower($previous_day), ['1','yes','true','y'], true) ? '1' : '0';

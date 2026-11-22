@@ -2,14 +2,14 @@
 /*
 Plugin Name: Convention Schedule
 Description: Manage and display an event workshop schedule with dates, times, rooms, categories, and multiple layouts.
-Version: 1.10.0
+Version: 1.11.0
 Author: California Steve Web Design
 Text Domain: convention-schedule
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('CSCHED_VER', '1.10.0');
+define('CSCHED_VER', '1.11.0');
 define('CSCHED_PATH', plugin_dir_path(__FILE__));
 define('CSCHED_URL', plugin_dir_url(__FILE__));
 

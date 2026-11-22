@@ -1,5 +1,15 @@
 # Convention Schedule – Changelog
 
+## 1.11.0 (2026-11-22)
+
+**New: choose or create a schedule during CSV import**
+- If no column in the file is matched to Schedule, the import screen asks which schedule the workshops go into. You'll see this even when the file's other columns match exactly.
+- You can pick any existing schedule (each shows its workshop count) or type a name to create a **new schedule**. A new name that matches an existing schedule reuses that schedule instead of making a duplicate.
+- You can also choose **Don't assign a schedule**. Workshops being updated then keep the schedule they already have.
+- The chosen schedule applies to every row in the file.
+- If you match a column to Schedule on the screen, the picker hides itself, and each row's own value is used instead.
+- Files that have a schedule column still import straight away.
+
 ## 1.10.0 (2026-11-22)
 
 **New: column matching for CSV import**

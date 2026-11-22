@@ -1,5 +1,20 @@
 # Convention Schedule – Changelog
 
+## 1.10.0 (2026-11-22)
+
+**New: column matching for CSV import**
+- If the column names in an uploaded CSV don't match the workshop fields, a **Match CSV Columns** screen opens before anything is imported. It lists each column in your file with sample values, and you choose which field it goes into (or "Don't import").
+- Best guesses are filled in from common header names. For example, Session Name → Title, Day → Date, Location → Room, Track → Categories, Convention → Schedule, and Workshop # → Workshop ID.
+- New **Time range** field: a single column such as "9:00 AM - 10:30 AM" or "11-1pm" is split into start and end times.
+- Tick **Let me review how columns are matched before importing** on the upload form to see the matching screen for any file.
+- The screen checks that Title is chosen and that no field is used twice. Cancel discards the upload. An unfinished upload expires after one hour.
+- Files that already use the plugin's own column names (including exports from 1.8.x and 1.9.0) still import straight away, as before.
+
+**Import improvements**
+- When a row updates an existing workshop (by ID), only the columns in the file are changed. A file with just ID, Title and Room no longer clears the date, times or description.
+- Semicolon- and tab-separated files are detected automatically. So are Windows/Excel (Windows-1252) encoded files, so accented characters come through correctly.
+- Categories can be separated by `|`, `,` or `;`, and can be names or slugs.
+
 ## 1.9.0 (2026-11-22)
 
 Schedules are now the one way to organize workshops. Schedule Events are retired.

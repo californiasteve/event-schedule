@@ -26,6 +26,7 @@ class CS_Admin {
         add_action('admin_post_csched_import_css', [__CLASS__, 'handle_import_css']);
         add_action('admin_post_csched_export_workshops_csv', [__CLASS__, 'handle_export_workshops_csv']);
         add_action('admin_post_csched_import_workshops_csv', [__CLASS__, 'handle_import_workshops_csv']);
+        add_action('admin_post_csched_import_workshops_csv_mapped', [__CLASS__, 'handle_import_workshops_csv_mapped']);
         add_action('admin_notices', [__CLASS__, 'admin_notices']);
         add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_admin_assets']);
     }
@@ -631,11 +632,30 @@ if (!empty($_GET['csched_import_done'])) {
     $notices[] = ['success', sprintf(__('Workshops CSV imported. Created: %d, Updated: %d, Skipped: %d.', 'convention-schedule'), $c, $u, $s)];
 }
 if (!empty($_GET['csched_import_error'])) {
-    $notices[] = ['error', __('Workshops CSV import failed. Please verify the file and try again.', 'convention-schedule')];
+    if ($_GET['csched_import_error'] === 'expired') {
+        $notices[] = ['error', __('That CSV import expired (imports wait one hour for column matching). Please upload the file again.', 'convention-schedule')];
+    } else {
+        $notices[] = ['error', __('Workshops CSV import failed. Please verify the file and try again.', 'convention-schedule')];
+    }
 }
 
 foreach ($notices as [$type, $msg]) {
     echo '<div class="notice notice-' . esc_attr($type) . ' is-dismissible"><p>' . esc_html($msg) . '</p></div>';
+}
+
+if (!empty($_GET['csched_map_cancel'])) {
+    delete_transient(self::import_transient_key(sanitize_text_field(wp_unslash((string)$_GET['csched_map_cancel']))));
+    echo '<div class="notice notice-info is-dismissible"><p>' . esc_html__('CSV import cancelled. Nothing was imported.', 'convention-schedule') . '</p></div>';
+}
+
+// CSV column matching step replaces the settings form until it is finished or cancelled.
+if (!empty($_GET['csched_map'])) {
+    $csched_token = sanitize_text_field(wp_unslash((string)$_GET['csched_map']));
+    if (self::render_import_mapping_screen($csched_token)) {
+        echo '</div>';
+        return;
+    }
+    echo '<div class="notice notice-error"><p>' . esc_html__('That CSV import expired (imports wait one hour for column matching). Please upload the file again.', 'convention-schedule') . '</p></div>';
 }
 ?>
 
@@ -905,10 +925,11 @@ foreach ($notices as [$type, $msg]) {
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <input type="hidden" name="action" value="csched_import_workshops_csv">
             <?php wp_nonce_field('csched_import_workshops_csv'); ?>
-            <input type="file" name="csched_workshops_csv_file" accept=".csv,text/csv" required>
+            <input type="file" name="csched_workshops_csv_file" accept=".csv,text/csv,.txt" required>
             <button type="submit" class="button button-secondary"><?php echo esc_html__('Import Workshops CSV', 'convention-schedule'); ?></button>
+            <label style="flex-basis:100%;"><input type="checkbox" name="csched_review_columns" value="1"> <?php echo esc_html__('Let me review how columns are matched before importing', 'convention-schedule'); ?></label>
         </form>
-        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Schedules and categories are created if missing. Older CSV files with an "event" column still import: the event slug is used as the schedule.', 'convention-schedule'); ?></p>
+        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Schedules and categories are created if missing. If your file\'s column names don\'t match, you\'ll be asked which field each column goes into before anything is imported.', 'convention-schedule'); ?></p>
     </div>
 </div>
 
@@ -1031,6 +1052,153 @@ private static function normalize_import_time(string $time): string {
     }
 }
 
+/**
+ * Fields a CSV column can be matched to. Keys are the canonical header names used by export.
+ */
+private static function import_fields(): array {
+    return [
+        'id'           => __('Workshop ID (updates an existing workshop)', 'convention-schedule'),
+        'title'        => __('Title (required)', 'convention-schedule'),
+        'description'  => __('Description', 'convention-schedule'),
+        'date'         => __('Date', 'convention-schedule'),
+        'start'        => __('Start time', 'convention-schedule'),
+        'end'          => __('End time', 'convention-schedule'),
+        'time_range'   => __('Time range, e.g. "9:00 AM - 10:30 AM" (start and end in one column)', 'convention-schedule'),
+        'room'         => __('Room', 'convention-schedule'),
+        'categories'   => __('Categories (separated by | , or ;)', 'convention-schedule'),
+        'schedule'     => __('Schedule', 'convention-schedule'),
+        'previous_day' => __('Show on previous day (1/0, yes/no)', 'convention-schedule'),
+    ];
+}
+
+/** Header spellings recognised automatically for each field (compared lowercase, letters/digits only). */
+private static function import_synonyms(): array {
+    return [
+        'id'           => ['id', 'workshopid', 'postid', 'sessionid'],
+        'title'        => ['title', 'name', 'workshop', 'workshopname', 'workshoptitle', 'session', 'sessionname', 'sessiontitle', 'topic', 'subject'],
+        'description'  => ['description', 'desc', 'details', 'summary', 'abstract', 'notes', 'content', 'body'],
+        'date'         => ['date', 'day', 'sessiondate', 'workshopdate', 'eventdate'],
+        'start'        => ['start', 'starttime', 'begin', 'begins', 'begintime', 'timestart', 'from'],
+        'end'          => ['end', 'endtime', 'finish', 'ends', 'finishtime', 'timeend', 'to', 'until'],
+        'time_range'   => ['time', 'times', 'timeslot', 'slot', 'timerange', 'hours'],
+        'room'         => ['room', 'location', 'venue', 'place', 'roomname', 'hall', 'where'],
+        'categories'   => ['categories', 'category', 'cats', 'cat', 'type', 'types', 'tags', 'track', 'tracks'],
+        'schedule'     => ['schedule', 'schedulename', 'scheduleslug', 'event', 'convention', 'conference'],
+        'previous_day' => ['previousday', 'prevday', 'showonpreviousday', 'previous'],
+    ];
+}
+
+private static function normalize_header(string $h): string {
+    $h = (string)preg_replace('/^\xEF\xBB\xBF/', '', $h);
+    return strtolower(trim($h));
+}
+
+/**
+ * Read an uploaded CSV into rows. Handles the UTF-8 BOM, Windows-1252 files from Excel,
+ * and comma, semicolon or tab delimiters.
+ *
+ * @return array|null [rows including the header row, delimiter]
+ */
+private static function read_csv_rows(string $raw): ?array {
+    $raw = (string)preg_replace('/^\xEF\xBB\xBF/', '', $raw);
+    if (trim($raw) === '') return null;
+    if (function_exists('mb_check_encoding') && !mb_check_encoding($raw, 'UTF-8')) {
+        $raw = mb_convert_encoding($raw, 'UTF-8', 'Windows-1252');
+    }
+
+    // Pick the delimiter that splits the header line into the most columns.
+    $first = (string)strtok($raw, "\r\n");
+    $delim = ',';
+    $best = 0;
+    foreach ([',', ';', "\t"] as $d) {
+        $n = count(str_getcsv($first, $d, '"', '\\'));
+        if ($n > $best) { $best = $n; $delim = $d; }
+    }
+
+    $fh = fopen('php://temp', 'r+');
+    fwrite($fh, $raw);
+    rewind($fh);
+    $rows = [];
+    while (($row = fgetcsv($fh, 0, $delim, '"', '\\')) !== false) {
+        if (!is_array($row)) continue;
+        $rows[] = array_map(function($v){ return $v === null ? '' : (string)$v; }, $row);
+    }
+    fclose($fh);
+    return empty($rows) ? null : [$rows, $delim];
+}
+
+/**
+ * Exact match: every column header is a field name this plugin exports (or the legacy "event").
+ * Returns field => column index, or null when the file needs the matching screen.
+ */
+private static function exact_column_map(array $header): ?array {
+    $known = array_merge(array_keys(self::import_fields()), ['event']);
+    $map = [];
+    foreach ($header as $i => $h) {
+        $h = self::normalize_header((string)$h);
+        if ($h === '') continue;
+        if (!in_array($h, $known, true) || isset($map[$h])) return null;
+        $map[$h] = (int)$i;
+    }
+    return isset($map['title']) ? $map : null;
+}
+
+/** Best guess for the matching screen: column index => field ('' = don't import). */
+private static function guess_column_map(array $header): array {
+    $syn = self::import_synonyms();
+    // Score every (column, field) pair: exact field name beats a synonym, and earlier
+    // synonyms in the list beat later ones. Then assign best scores first, one column per field.
+    $cands = [];
+    foreach ($header as $i => $h) {
+        $raw = self::normalize_header((string)$h);
+        $norm = (string)preg_replace('/[^a-z0-9]/', '', $raw);
+        if ($norm === '') continue;
+        // "Workshop #", "Session No.", "Session Number", "Workshop ID" are IDs, not titles.
+        if (preg_match('/(#|\bno\.?$|\bnumber$|\bid$)/', $raw)) {
+            $cands[] = [0, (int)$i, 'id'];
+            continue;
+        }
+        foreach ($syn as $field => $words) {
+            if ($norm === str_replace('_', '', $field)) { $cands[] = [0, (int)$i, $field]; continue; }
+            $pos = array_search($norm, $words, true);
+            if ($pos !== false) $cands[] = [1 + (int)$pos, (int)$i, $field];
+        }
+    }
+    usort($cands, function($x, $y){ return ($x[0] <=> $y[0]) ?: ($x[1] <=> $y[1]); });
+    $guess = [];
+    $taken = [];
+    foreach ($cands as [$score, $i, $field]) {
+        if (isset($guess[$i]) || isset($taken[$field])) continue;
+        $guess[$i] = $field;
+        $taken[$field] = true;
+    }
+    foreach ($header as $i => $h) if (!isset($guess[$i])) $guess[$i] = '';
+    ksort($guess);
+    return $guess;
+}
+
+private static function import_transient_key(string $token): string {
+    return 'csched_imp_' . get_current_user_id() . '_' . preg_replace('/[^A-Za-z0-9]/', '', $token);
+}
+
+private static function settings_url(array $args = []): string {
+    return add_query_arg($args, admin_url('edit.php?post_type=' . CS_Plugin::CPT . '&page=csched-settings'));
+}
+
+private static function redirect_import_done(array $result): void {
+    wp_safe_redirect(self::settings_url([
+        'csched_import_done' => 1,
+        'created' => (int)$result['created'],
+        'updated' => (int)$result['updated'],
+        'skipped' => (int)$result['skipped'],
+    ]));
+    exit;
+}
+
+/**
+ * Step 1: upload. Files whose headers already match import straight away; anything else
+ * (or when "review column matching" is ticked) goes to the column-matching screen.
+ */
 public static function handle_import_workshops_csv(): void {
     if (!current_user_can('manage_options')) wp_die(__('Unauthorized', 'convention-schedule'));
     check_admin_referer('csched_import_workshops_csv');
@@ -1038,48 +1206,184 @@ public static function handle_import_workshops_csv(): void {
     if (empty($_FILES['csched_workshops_csv_file']['tmp_name'])) {
         self::redirect_settings_notice('csched_import_error', 'missing_file');
     }
-
     $file = $_FILES['csched_workshops_csv_file'];
-
     if (!empty($file['error'])) {
         self::redirect_settings_notice('csched_import_error', 'upload_error');
     }
 
-    $tmp = $file['tmp_name'];
-    $fh = fopen($tmp, 'r');
-    if (!$fh) {
+    $raw = @file_get_contents($file['tmp_name']);
+    if ($raw === false) {
         self::redirect_settings_notice('csched_import_error', 'read_error');
     }
-
-    // Handle BOM and read header
-    $header = fgetcsv($fh);
-    if (!$header || !is_array($header)) {
-        fclose($fh);
+    $parsed = self::read_csv_rows((string)$raw);
+    if (!$parsed) {
         self::redirect_settings_notice('csched_import_error', 'bad_header');
     }
+    [$rows, $delim] = $parsed;
+    $header = $rows[0];
 
-    // Normalize headers
-    $header = array_map(function($h) {
-        // Strip the UTF-8 BOM that our own export writes, so the first column ("id") is recognised.
-        if (is_string($h)) $h = preg_replace('/^\xEF\xBB\xBF/', '', $h);
-        $h = is_string($h) ? strtolower(trim($h)) : '';
-        return $h;
-    }, $header);
-
-    $col_index = array_flip($header);
-
-    $required = ['title', 'date', 'start', 'end', 'room', 'description', 'categories', 'id'];
-    // Not all required; but we expect at least title
-    if (!isset($col_index['title'])) {
-        fclose($fh);
-        self::redirect_settings_notice('csched_import_error', 'missing_title');
+    $force_review = !empty($_POST['csched_review_columns']);
+    $map = $force_review ? null : self::exact_column_map($header);
+    if ($map !== null) {
+        self::redirect_import_done(self::run_import(array_slice($rows, 1), $map));
     }
 
+    // Needs matching: keep the parsed file for this user for one hour.
+    $token = wp_generate_password(16, false, false);
+    set_transient(self::import_transient_key($token), [
+        'rows' => $rows,
+        'filename' => sanitize_file_name((string)($file['name'] ?? 'import.csv')),
+        'delimiter' => $delim,
+    ], HOUR_IN_SECONDS);
+
+    wp_safe_redirect(self::settings_url(['csched_map' => $token]));
+    exit;
+}
+
+/** Step 2: the column-matching form was submitted. */
+public static function handle_import_workshops_csv_mapped(): void {
+    if (!current_user_can('manage_options')) wp_die(__('Unauthorized', 'convention-schedule'));
+    check_admin_referer('csched_import_workshops_csv_mapped');
+
+    $token = isset($_POST['csched_map']) ? sanitize_text_field(wp_unslash((string)$_POST['csched_map'])) : '';
+    $data = $token !== '' ? get_transient(self::import_transient_key($token)) : false;
+    if (!is_array($data) || empty($data['rows'])) {
+        self::redirect_settings_notice('csched_import_error', 'expired');
+    }
+
+    $fields = self::import_fields();
+    $posted = (isset($_POST['csched_col']) && is_array($_POST['csched_col'])) ? wp_unslash($_POST['csched_col']) : [];
+    $header = $data['rows'][0];
+    $map = [];
+    $chosen = [];
+    $dupes = [];
+    foreach ($header as $i => $h) {
+        $field = isset($posted[$i]) ? sanitize_key((string)$posted[$i]) : '';
+        if ($field === '' || !isset($fields[$field])) { $chosen[$i] = ''; continue; }
+        $chosen[$i] = $field;
+        if (isset($map[$field])) { $dupes[$field] = true; continue; }
+        $map[$field] = (int)$i;
+    }
+
+    $error = '';
+    if (!isset($map['title'])) $error = 'no_title';
+    elseif (!empty($dupes)) $error = 'duplicate';
+
+    if ($error !== '') {
+        // Keep the choices so the screen re-opens as the user left it.
+        $data['chosen'] = $chosen;
+        set_transient(self::import_transient_key($token), $data, HOUR_IN_SECONDS);
+        wp_safe_redirect(self::settings_url(['csched_map' => $token, 'csched_map_error' => $error]));
+        exit;
+    }
+
+    delete_transient(self::import_transient_key($token));
+    self::redirect_import_done(self::run_import(array_slice($data['rows'], 1), $map));
+}
+
+/** The column-matching screen (shown on the Settings page when ?csched_map= is present). */
+private static function render_import_mapping_screen(string $token): bool {
+    $data = get_transient(self::import_transient_key($token));
+    if (!is_array($data) || empty($data['rows'])) return false;
+
+    $rows = $data['rows'];
+    $header = $rows[0];
+    $samples = array_slice($rows, 1, 3);
+    $count = max(0, count($rows) - 1);
+    $fields = self::import_fields();
+    $chosen = (isset($data['chosen']) && is_array($data['chosen'])) ? $data['chosen'] : self::guess_column_map($header);
+    $err = isset($_GET['csched_map_error']) ? sanitize_key((string)$_GET['csched_map_error']) : '';
+    ?>
+    <h2><?php echo esc_html__('Match CSV Columns', 'convention-schedule'); ?></h2>
+    <p style="max-width:820px;">
+        <?php echo esc_html(sprintf(
+            /* translators: 1: file name, 2: number of rows */
+            __('Choose which workshop field each column of %1$s goes into, then import. We filled in our best guesses. %2$d row(s) will be imported.', 'convention-schedule'),
+            (string)$data['filename'], $count
+        )); ?>
+    </p>
+    <?php if ($err === 'no_title'): ?>
+        <div class="notice notice-error inline"><p><?php echo esc_html__('Choose the column that holds the workshop title. Title is required.', 'convention-schedule'); ?></p></div>
+    <?php elseif ($err === 'duplicate'): ?>
+        <div class="notice notice-error inline"><p><?php echo esc_html__('Each field can only be used once. Two or more columns are set to the same field.', 'convention-schedule'); ?></p></div>
+    <?php endif; ?>
+
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+        <input type="hidden" name="action" value="csched_import_workshops_csv_mapped">
+        <input type="hidden" name="csched_map" value="<?php echo esc_attr($token); ?>">
+        <?php wp_nonce_field('csched_import_workshops_csv_mapped'); ?>
+        <table class="widefat striped" style="max-width:1100px;">
+            <thead><tr>
+                <th style="width:22%;"><?php echo esc_html__('Column in your file', 'convention-schedule'); ?></th>
+                <th style="width:38%;"><?php echo esc_html__('Sample values', 'convention-schedule'); ?></th>
+                <th><?php echo esc_html__('Import into', 'convention-schedule'); ?></th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ($header as $i => $h):
+                $label = trim((string)preg_replace('/^\xEF\xBB\xBF/', '', (string)$h));
+                $vals = [];
+                foreach ($samples as $r) {
+                    $v = trim((string)($r[$i] ?? ''));
+                    if ($v !== '') $vals[] = mb_strimwidth($v, 0, 60, '…');
+                }
+                $sel = (string)($chosen[$i] ?? '');
+                ?>
+                <tr>
+                    <td><strong><?php echo $label !== '' ? esc_html($label) : '<em>' . esc_html(sprintf(__('(column %d, no header)', 'convention-schedule'), $i + 1)) . '</em>'; ?></strong></td>
+                    <td style="color:#555;"><?php echo $vals ? esc_html(implode(' · ', $vals)) : '<em>' . esc_html__('(empty)', 'convention-schedule') . '</em>'; ?></td>
+                    <td>
+                        <select name="csched_col[<?php echo (int)$i; ?>]" style="max-width:100%;">
+                            <option value=""><?php echo esc_html__('— Don\'t import —', 'convention-schedule'); ?></option>
+                            <?php foreach ($fields as $key => $flabel): ?>
+                                <option value="<?php echo esc_attr($key); ?>" <?php selected($sel, $key); ?>><?php echo esc_html($flabel); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <p class="description" style="max-width:820px;">
+            <?php echo esc_html__('Columns set to "Don\'t import" are ignored. When a Workshop ID matches an existing workshop, that workshop is updated and fields you don\'t import are left as they are. Dates and times can be in most common formats, such as 2026-05-01, 5/1/2026, 14:00 or 2:00 PM.', 'convention-schedule'); ?>
+        </p>
+        <p>
+            <button type="submit" class="button button-primary"><?php echo esc_html__('Import Workshops', 'convention-schedule'); ?></button>
+            <a class="button" href="<?php echo esc_url(self::settings_url(['csched_map_cancel' => $token])); ?>"><?php echo esc_html__('Cancel', 'convention-schedule'); ?></a>
+        </p>
+    </form>
+    <?php
+    return true;
+}
+
+/** Split "9:00 AM - 10:30 AM" (also "9-10am", "9:00 to 10:00") into [start, end]. */
+private static function split_time_range(string $v): array {
+    $v = trim($v);
+    if ($v === '') return ['', ''];
+    $parts = preg_split('/\s*(?:-|–|—|\bto\b)\s*/iu', $v, 2);
+    $start = trim((string)($parts[0] ?? ''));
+    $end = trim((string)($parts[1] ?? ''));
+    // "9-10am" / "11-1pm": give a bare start the am/pm that puts it before the end.
+    if ($end !== '' && preg_match('/(am|pm)$/i', $end, $m) && preg_match('/^\d{1,2}(:\d{2})?$/', $start)) {
+        $same = $start . ' ' . strtolower($m[1]);
+        $other = $start . ' ' . (strtolower($m[1]) === 'pm' ? 'am' : 'pm');
+        $end_t = self::normalize_import_time($end);
+        $same_t = self::normalize_import_time($same);
+        $start = ($same_t !== '' && $end_t !== '' && $same_t > $end_t) ? $other : $same;
+    }
+    return [$start, $end];
+}
+
+/**
+ * Import data rows using a field => column index map.
+ * @return array{created:int, updated:int, skipped:int}
+ */
+private static function run_import(array $rows, array $col_index): array {
     $created = 0;
     $updated = 0;
     $skipped = 0;
+    $has = function(string $key) use ($col_index) { return isset($col_index[$key]); };
 
-    while (($row = fgetcsv($fh)) !== false) {
+    foreach ($rows as $row) {
         if (!is_array($row) || count(array_filter($row, fn($v) => $v !== null && trim((string)$v) !== '')) === 0) {
             continue;
         }
@@ -1099,25 +1403,32 @@ public static function handle_import_workshops_csv(): void {
         $desc = wp_kses_post($desc);
 
         $date  = self::normalize_import_date(sanitize_text_field($get('date')));
-        $start = self::normalize_import_time(sanitize_text_field($get('start')));
-        $end   = self::normalize_import_time(sanitize_text_field($get('end')));
+        $start_raw = $get('start');
+        $end_raw = $get('end');
+        if ($has('time_range')) {
+            [$range_start, $range_end] = self::split_time_range($get('time_range'));
+            if (!$has('start')) $start_raw = $range_start;
+            if (!$has('end')) $end_raw = $range_end;
+        }
+        $start = self::normalize_import_time(sanitize_text_field($start_raw));
+        $end   = self::normalize_import_time(sanitize_text_field($end_raw));
         $room  = sanitize_text_field($get('room'));
         // Schedule column. Older exports (1.8.x) also had an "event" column: when the schedule
         // cell is blank, the event value is used as the schedule.
-        $has_schedule_col = isset($col_index['schedule']) || isset($col_index['event']);
+        $has_schedule_col = $has('schedule') || $has('event');
         $schedule_raw = trim($get('schedule'));
         if ($schedule_raw === '') $schedule_raw = trim($get('event'));
         $schedule_slug = sanitize_title($schedule_raw);
-        $has_previous_day_col = isset($col_index['previous_day']);
+        $has_previous_day_col = $has('previous_day');
         $previous_day = trim($get('previous_day'));
         $previous_day = in_array(strtolower($previous_day), ['1','yes','true','y'], true) ? '1' : '0';
 
         $postarr = [
             'post_type' => CS_Plugin::CPT,
             'post_title' => $title,
-            'post_content' => $desc,
             'post_status' => 'publish',
         ];
+        if ($has('description')) $postarr['post_content'] = $desc;
 
         $post_id = 0;
         $is_update = false;
@@ -1142,10 +1453,11 @@ public static function handle_import_workshops_csv(): void {
             continue;
         }
 
-        update_post_meta($post_id, CS_Plugin::META_DATE, $date);
-        update_post_meta($post_id, CS_Plugin::META_START, $start);
-        update_post_meta($post_id, CS_Plugin::META_END, $end);
-        update_post_meta($post_id, CS_Plugin::META_ROOM, $room);
+        // On updates, only overwrite fields the file actually provides.
+        if (!$is_update || $has('date')) update_post_meta($post_id, CS_Plugin::META_DATE, $date);
+        if (!$is_update || $has('start') || $has('time_range')) update_post_meta($post_id, CS_Plugin::META_START, $start);
+        if (!$is_update || $has('end') || $has('time_range')) update_post_meta($post_id, CS_Plugin::META_END, $end);
+        if (!$is_update || $has('room')) update_post_meta($post_id, CS_Plugin::META_ROOM, $room);
         if ($has_previous_day_col) {
             update_post_meta($post_id, CS_Plugin::META_PREVIOUS_DAY, $previous_day);
         }
@@ -1176,7 +1488,8 @@ public static function handle_import_workshops_csv(): void {
         // Categories: slugs separated by |
         $cats_raw = trim($get('categories'));
         if ($cats_raw !== '') {
-            $slugs = array_filter(array_map('trim', explode('|', $cats_raw)));
+            // Slugs or names, separated by | (export format), comma or semicolon.
+            $slugs = array_filter(array_map('trim', preg_split('/[|,;]/', $cats_raw)));
             $term_ids = [];
             foreach ($slugs as $slug) {
                 $slug = sanitize_title($slug);
@@ -1200,17 +1513,7 @@ public static function handle_import_workshops_csv(): void {
         if ($is_update) $updated++; else $created++;
     }
 
-    fclose($fh);
-
-    $args = [
-        'csched_import_done' => 1,
-        'created' => $created,
-        'updated' => $updated,
-        'skipped' => $skipped,
-    ];
-
-    wp_safe_redirect(add_query_arg($args, admin_url('edit.php?post_type=' . CS_Plugin::CPT . '&page=csched-settings')));
-    exit;
+    return ['created' => $created, 'updated' => $updated, 'skipped' => $skipped];
 }
 
 private static function redirect_settings_notice(string $key, string $val): void {
@@ -1339,6 +1642,7 @@ public static function render_setup_usage_page(): void {
                 <h2><?php echo esc_html__('9. CSV Import / Export', 'convention-schedule'); ?></h2>
                 <p><?php echo esc_html__('Use the CSV tools in Settings to move or bulk-edit workshops. Exports include workshop ID, title, description, date, start/end time, room, categories, schedule, and previous-day flag.', 'convention-schedule'); ?></p>
                 <p><?php echo esc_html__('Use schedule slugs in the schedule column and category slugs separated by | in the categories column. Missing schedules and categories are created during import. CSV files exported from older versions still import: a value in the old event column is used as the schedule when the schedule cell is blank.', 'convention-schedule'); ?></p>
+                <p><?php echo esc_html__('Files from other sources (spreadsheets, registration systems) can be imported too. If the column names don\'t match, a matching screen shows each column with sample values so you can choose which field it goes into, such as Session Name → Title or Location → Room. A single "9:00 AM - 10:30 AM" column can be split into start and end times. Tick "Let me review how columns are matched" on the upload form to see that screen for any file.', 'convention-schedule'); ?></p>
             </div>
 
             <div class="csched-help-card">

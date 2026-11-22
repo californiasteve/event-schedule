@@ -26,7 +26,10 @@ class CS_Plugin {
     const OPT_SHOW_CONTROLS = 'csched_show_controls'; // 1|0
     const OPT_GROUP_BY = 'csched_default_group_by'; // date|category
     const OPT_SHOW_SEARCH = 'csched_show_search'; // 1|0
-    const OPT_DAY_CUTOFF = 'csched_day_cutoff'; // HH:MM (e.g., 01:00) treat after-midnight as previous day
+    const OPT_DAY_CUTOFF = 'csched_day_cutoff'; // legacy, unused since 1.8 (replaced by per-workshop checkbox)
+    // After-midnight grace period: workshops starting between midnight and this many minutes
+    // after it are shown at the end of the previous day. 0 = off.
+    const OPT_DAY_EXTENSION = 'csched_day_extension';
 
     // Allow users to switch between table/cards/grid on the front-end controls bar
     const OPT_SHOW_VIEW_SWITCHER = 'csched_show_view_switcher'; // 1|0

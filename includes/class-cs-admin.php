@@ -111,7 +111,7 @@ JS;
         echo '<p>';
         echo '<label><input type="checkbox" name="csched_previous_day" value="1" ' . checked($previous_day, '1', false) . '> ';
         echo esc_html__('Display this workshop on the previous schedule day', 'convention-schedule') . '</label><br>';
-        echo '<span class="description">' . esc_html__('Use this for after-midnight workshops that should appear under the prior day. Leave unchecked for after-midnight workshops that should stay on their actual date.', 'convention-schedule') . '</span>';
+        echo '<span class="description">' . esc_html__('Use this for after-midnight workshops that should appear under the prior day. Workshops inside the After-Midnight Grace Period (Settings) move there automatically; this box is for ones that start later.', 'convention-schedule') . '</span>';
         echo '</p>';
 
         $saved_rooms = self::get_saved_rooms();
@@ -329,6 +329,11 @@ add_submenu_page(
         register_setting('csched_settings', CS_Plugin::OPT_SHOW_SEARCH, ['type'=>'string','sanitize_callback'=>$simple,'default'=>'1']);
         register_setting('csched_settings', CS_Plugin::OPT_GROUP_BY, ['type'=>'string','sanitize_callback'=>$simple,'default'=>'date']);
         register_setting('csched_settings', CS_Plugin::OPT_DAY_CUTOFF, ['type'=>'string','sanitize_callback'=>[__CLASS__,'sanitize_cutoff'],'default'=>'01:00']);
+        register_setting('csched_settings', CS_Plugin::OPT_DAY_EXTENSION, [
+            'type' => 'integer',
+            'sanitize_callback' => function($v){ return max(0, min(720, (int)$v)); },
+            'default' => 0,
+        ]);
 
         register_setting('csched_settings', CS_Plugin::OPT_CONTROL_ORDER, [
             'type' => 'string',
@@ -708,6 +713,25 @@ if (!empty($_GET['csched_map'])) {
                                 <input type="checkbox" name="<?php echo esc_attr(CS_Plugin::OPT_SHOW_DOW); ?>" value="1" <?php checked($show_dow, '1'); ?>>
                                 <?php echo esc_html__('Show day of week in date headings', 'convention-schedule'); ?>
                             </label>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><label for="<?php echo esc_attr(CS_Plugin::OPT_DAY_EXTENSION); ?>"><?php echo esc_html__('After-Midnight Grace Period', 'convention-schedule'); ?></label></th>
+                        <td>
+                            <?php $csched_ext = (int)get_option(CS_Plugin::OPT_DAY_EXTENSION, 0); ?>
+                            <select id="<?php echo esc_attr(CS_Plugin::OPT_DAY_EXTENSION); ?>" name="<?php echo esc_attr(CS_Plugin::OPT_DAY_EXTENSION); ?>">
+                                <option value="0" <?php selected($csched_ext, 0); ?>><?php echo esc_html__('Off: each day ends at midnight', 'convention-schedule'); ?></option>
+                                <?php foreach ([30, 60, 90, 120, 150, 180, 240, 300, 360] as $m):
+                                    $label = sprintf(
+                                        /* translators: %s: time such as 2:00 AM */
+                                        __('Extend each day until %s', 'convention-schedule'),
+                                        gmdate('g:i A', $m * 60)
+                                    ); ?>
+                                    <option value="<?php echo (int)$m; ?>" <?php selected($csched_ext, $m); ?>><?php echo esc_html($label); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description" style="max-width:640px;"><?php echo esc_html__('Workshops that start after midnight but before this time are shown at the end of the previous day, as a continuation of it. Example: with "until 2:00 AM", a dance at 12:01 AM Saturday is listed last under Friday. Its time still shows as 12:01 AM. Individual workshops can also be moved with the "Display this workshop on the previous schedule day" box.', 'convention-schedule'); ?></p>
                         </td>
                     </tr>
 
@@ -1729,6 +1753,7 @@ public static function render_setup_usage_page(): void {
                         <tr><td><code>show_categories</code></td><td><code>1</code> / <code>0</code></td></tr>
                         <tr><td><code>show_description</code></td><td><code>1</code> / <code>0</code></td></tr>
                         <tr><td><code>order</code></td><td><code>ASC</code> / <code>DESC</code></td></tr>
+                        <tr><td><code>day_extension</code></td><td><?php echo esc_html__('After-midnight grace period for this page, in minutes (120) or as a time (02:00). 0 turns it off.', 'convention-schedule'); ?></td></tr>
                     </tbody>
                 </table>
                 <p class="description"><?php echo wp_kses_post(__('Older shortcodes still work: <code>event="slug"</code> behaves like <code>schedule="slug"</code>, and <code>show_event_filter="1"</code> shows the Schedule dropdown. New pages should use <code>schedule</code> and <code>show_schedule_filter</code>.', 'convention-schedule')); ?></p>
@@ -1736,8 +1761,9 @@ public static function render_setup_usage_page(): void {
 
             <div class="csched-help-card">
                 <h2><?php echo esc_html__('6. After-Midnight Workshops', 'convention-schedule'); ?></h2>
-                <p><?php echo wp_kses_post(__('For an individual after-midnight workshop that should appear under the prior convention day, edit that workshop and check <strong>Display this workshop on the previous schedule day</strong>.', 'convention-schedule')); ?></p>
-                <p><?php echo esc_html__('Leave it unchecked when the workshop should remain on its actual calendar date.', 'convention-schedule'); ?></p>
+                <p><?php echo wp_kses_post(__('To keep late-night items (dances, meetings, socials) with the evening they belong to, go to <strong>Workshops → Settings → After-Midnight Grace Period</strong> and choose how far past midnight each day extends, for example until 2:00 AM. A dance at 12:01 AM Saturday is then listed at the end of Friday, and its time still reads 12:01 AM.', 'convention-schedule')); ?></p>
+                <p><?php echo wp_kses_post(__('For a single workshop that starts later than the grace period but should still appear under the prior day, edit it and check <strong>Display this workshop on the previous schedule day</strong>.', 'convention-schedule')); ?></p>
+                <p><?php echo wp_kses_post(__('A page can use its own grace period with the shortcode attribute <code>day_extension</code>, in minutes or as a time: <code>[convention_schedule day_extension="02:00"]</code>. Use <code>day_extension="0"</code> to turn it off for that page.', 'convention-schedule')); ?></p>
             </div>
 
             <div class="csched-help-card">

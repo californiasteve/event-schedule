@@ -92,6 +92,27 @@ private static function minutes_to_hhmm(int $mins): string {
     return sprintf('%02d:%02d', $h, $m);
 }
 
+/**
+ * After-midnight grace period in minutes (0 = off). Shortcode value may be minutes ("120")
+ * or a time ("02:00"); otherwise the Settings value is used.
+ */
+private static function get_day_extension_minutes(string $override = ''): int {
+    $override = trim($override);
+    if ($override !== '') {
+        if (ctype_digit($override)) return max(0, min(720, (int)$override));
+        $m = self::parse_time_to_minutes(self::normalize_hhmm($override));
+        return $m === null ? 0 : max(0, min(720, $m));
+    }
+    return max(0, min(720, (int)get_option(CS_Plugin::OPT_DAY_EXTENSION, 0)));
+}
+
+/** True when a start time falls inside the after-midnight grace period. */
+private static function in_day_extension(string $start, int $extension_minutes): bool {
+    if ($extension_minutes <= 0) return false;
+    $m = self::parse_time_to_minutes($start);
+    return $m !== null && $m < $extension_minutes;
+}
+
 private static function get_day_cutoff_minutes(string $override = ''): int {
     $cut = $override !== '' ? $override : (string)get_option(CS_Plugin::OPT_DAY_CUTOFF, '01:00');
     $cut = self::normalize_hhmm($cut);
@@ -101,14 +122,14 @@ private static function get_day_cutoff_minutes(string $override = ''): int {
 }
 
 
-public static function effective_date_for_item(string $date, string $start, int $cutoff_minutes = 0, bool $previous_day = false): string {
+public static function effective_date_for_item(string $date, string $start, int $extension_minutes = 0, bool $previous_day = false): string {
         $date = trim($date);
         if ($date === '') {
             return '';
         }
 
-        // Per-workshop control replaces the old global End of Day Cutoff behavior.
-        if ($previous_day) {
+        // Per-workshop checkbox, or start inside the after-midnight grace period.
+        if ($previous_day || self::in_day_extension($start, $extension_minutes)) {
             $ts = strtotime($date . ' -1 day');
             if ($ts) {
                 return date('Y-m-d', $ts);
@@ -118,10 +139,15 @@ public static function effective_date_for_item(string $date, string $start, int 
         return $date;
     }
 
-public static function effective_sort_minutes(string $start, int $cutoff_minutes = 0, bool $previous_day = false): ?int {
+public static function effective_sort_minutes(string $start, int $extension_minutes = 0, bool $previous_day = false): ?int {
         $minutes = self::parse_time_to_minutes($start);
         if ($minutes === null) {
             return null;
+        }
+
+        // Grace-period items continue the previous day, after its evening items.
+        if (self::in_day_extension($start, $extension_minutes)) {
+            return $minutes + 1440;
         }
 
         // Previous-day after-midnight items sort after previous day evening items.
@@ -518,6 +544,7 @@ public static function render_schedule($atts): string {
             'time_format' => '',
             'show_day_of_week' => '',
             'day_cutoff' => '',
+            'day_extension' => '',
             'show_categories' => '1',
             'show_description' => '1',
             'order' => 'ASC',
@@ -591,6 +618,8 @@ $time_fmt = sanitize_text_field($atts['time_format']);
         $is_elementor = self::is_elementor_context();
         // End-of-day cutoff minutes (events after midnight can be treated as previous day)
         $cutoff_minutes = self::get_day_cutoff_minutes( isset($atts['day_cutoff']) ? sanitize_text_field((string)$atts['day_cutoff']) : '' );
+        // After-midnight grace period (Settings, or day_extension="" on the shortcode).
+        $extension_minutes = self::get_day_extension_minutes( isset($atts['day_extension']) ? sanitize_text_field((string)$atts['day_extension']) : '' );
 
 
         // Determine requested filters from URL first (when controls enabled)
@@ -746,8 +775,8 @@ $time_fmt = sanitize_text_field($atts['time_format']);
                 'room' => $roomv,
                 'cats' => $cats,
                 'previous_day' => ($previous_day === '1'),
-                'effective_date' => self::effective_date_for_item($date, $start, $cutoff_minutes, $previous_day === '1'),
-                'sort_minutes' => self::effective_sort_minutes($start, $cutoff_minutes, $previous_day === '1'),
+                'effective_date' => self::effective_date_for_item($date, $start, $extension_minutes, $previous_day === '1'),
+                'sort_minutes' => self::effective_sort_minutes($start, $extension_minutes, $previous_day === '1'),
             ];
         }
 
@@ -896,10 +925,11 @@ foreach ($g['items'] as &$it) {
     // Handle sessions that cross midnight (end earlier than start)
     if ($end_base < $start_base) $end_base += 1440;
 
-    // Apply cutoff adjustment to end as well
-    if ($cutoff_minutes > 0) {
-        if ($start_base < $cutoff_minutes) $start_base += 1440; // mirror effective_sort_minutes
-        if ($end_base < $cutoff_minutes) $end_base += 1440;
+    // Items moved to the end of the previous day (grace period or checkbox) sort after
+    // midnight (+1440); shift their start/end the same way so the grid span is right.
+    if ($sm >= 1440 && $start_base < 1440) {
+        $start_base += 1440;
+        $end_base += 1440;
     }
 
     // If end is still before start (edge cases), clamp

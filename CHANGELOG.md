@@ -1,5 +1,17 @@
 # Convention Schedule – Changelog
 
+## 1.12.0 (2026-11-22)
+
+**New: After-Midnight Grace Period**
+- New setting under **Workshops → Settings → Display Defaults**: *After-Midnight Grace Period*. You can extend each day until 12:30, 1:00, 1:30, 2:00, 2:30, 3:00, 4:00, 5:00 or 6:00 AM. It is off by default, so existing sites don't change until you turn it on.
+- Workshops that start after midnight but before that time are listed at the **end of the previous day**, as a continuation of it. For example, with "until 2:00 AM", a dance at 12:01 AM Saturday appears last under Friday. Its time still reads 12:01 AM.
+- This works in the table, card and grid layouts.
+- A page can override the setting with `[convention_schedule day_extension="02:00"]`, in minutes or as a time. `day_extension="0"` turns it off for that page.
+- The per-workshop box "Display this workshop on the previous schedule day" still works, for workshops that start later than the grace period.
+
+**Fixed**
+- In the grid layout, a workshop moved to the previous day with the checkbox now spans the right number of time rows. It used to collapse to a single row.
+
 ## 1.11.0 (2026-11-22)
 
 **New: choose or create a schedule during CSV import**

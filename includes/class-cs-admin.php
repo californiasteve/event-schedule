@@ -175,31 +175,7 @@ JS;
             }
         }
         echo '</select></p>';
-        echo '<p class="description">' . esc_html__('Manage schedules under Workshops -> Schedules. Use the schedule slug in the shortcode to display this schedule on its own page.', 'convention-schedule') . '</p>';
-
-        $event_terms = get_terms([
-            'taxonomy' => CS_Plugin::EVENT_TAX,
-            'hide_empty' => false,
-        ]);
-        $current_event = (string)get_post_meta($post->ID, self::META_EVENT, true);
-        if ($current_event === '') {
-            $existing_events = wp_get_post_terms($post->ID, CS_Plugin::EVENT_TAX, ['fields' => 'slugs']);
-            if (!is_wp_error($existing_events) && !empty($existing_events)) {
-                $current_event = (string)$existing_events[0];
-            }
-        }
-
-        echo '<p><label><strong>' . esc_html__('Event', 'convention-schedule') . '</strong></label><br>';
-        echo '<select name="csched_event" style="max-width:420px;width:100%;">';
-        echo '<option value="">' . esc_html__('Select Event', 'convention-schedule') . '</option>';
-        if (!is_wp_error($event_terms) && !empty($event_terms)) {
-            foreach ($event_terms as $event_term) {
-                echo '<option value="' . esc_attr($event_term->slug) . '"' . selected($current_event, $event_term->slug, false) . '>' . esc_html($event_term->name) . '</option>';
-            }
-        }
-        echo '</select></p>';
-        echo '<p class="description">' . esc_html__('Manage events under Workshops → Events. Use event slugs in shortcodes, for example [convention_schedule event="2026-lrcna"].', 'convention-schedule') . '</p>';
-
+        echo '<p class="description">' . esc_html__('Manage schedules under Workshops → Schedules. Use the schedule slug in the shortcode to show this schedule on its own page, for example [convention_schedule schedule="2026-convention"].', 'convention-schedule') . '</p>';
 
 
         echo '<p style="margin-top:10px; color:#555;">' .
@@ -217,7 +193,6 @@ JS;
         $start = isset($_POST['csched_start']) ? sanitize_text_field($_POST['csched_start']) : '';
         $end   = isset($_POST['csched_end']) ? sanitize_text_field($_POST['csched_end']) : '';
         $room  = isset($_POST['csched_room']) ? sanitize_text_field($_POST['csched_room']) : '';
-        $event = isset($_POST['csched_event']) ? sanitize_title(wp_unslash($_POST['csched_event'])) : '';
         $schedule = isset($_POST['csched_schedule']) ? sanitize_title(wp_unslash($_POST['csched_schedule'])) : '';
         $previous_day = isset($_POST['csched_previous_day']) ? '1' : '0';
 
@@ -230,18 +205,22 @@ JS;
         update_post_meta($post_id, CS_Plugin::META_END, $end);
         update_post_meta($post_id, CS_Plugin::META_ROOM, $room);
         update_post_meta($post_id, CS_Plugin::META_PREVIOUS_DAY, $previous_day);
-        update_post_meta($post_id, CS_Plugin::META_PREVIOUS_DAY, $previous_day);
-        update_post_meta($post_id, CS_Plugin::META_EVENT, $event);
+
+        $old_schedules = wp_get_object_terms($post_id, CS_Plugin::SCHEDULE_TAX, ['fields' => 'slugs']);
+        $old_schedule = (!is_wp_error($old_schedules) && !empty($old_schedules)) ? (string)$old_schedules[0] : (string)get_post_meta($post_id, CS_Plugin::META_SCHEDULE, true);
+
         update_post_meta($post_id, CS_Plugin::META_SCHEDULE, $schedule);
         if ($schedule !== '') {
             wp_set_object_terms($post_id, [$schedule], CS_Plugin::SCHEDULE_TAX, false);
         } else {
             wp_set_object_terms($post_id, [], CS_Plugin::SCHEDULE_TAX, false);
         }
-        if ($event !== '') {
-            wp_set_object_terms($post_id, [$event], CS_Plugin::EVENT_TAX, false);
-        } else {
+        // Legacy Schedule Events are no longer edited here. Old event data is left alone so that
+        // old event="" pages keep working, unless the schedule was deliberately changed: then the
+        // workshop follows its new schedule and drops off the old event's page.
+        if ($schedule !== $old_schedule) {
             wp_set_object_terms($post_id, [], CS_Plugin::EVENT_TAX, false);
+            delete_post_meta($post_id, CS_Plugin::META_EVENT);
         }
     }
 
@@ -254,7 +233,6 @@ JS;
                 $new['cs_time']  = __('Time', 'convention-schedule');
                 $new['cs_room']  = __('Room', 'convention-schedule');
                 $new['cs_schedule_col'] = __('Schedule', 'convention-schedule');
-                $new['cs_event_col'] = __('Event', 'convention-schedule');
                 $new['cs_prev_day'] = __('Previous Day', 'convention-schedule');
             }
         }
@@ -396,9 +374,10 @@ add_submenu_page(
 }
 
     public static function sanitize_control_order($val): string {
-        $allowed = ['schedule','event','category','group','room','view','search'];
+        $allowed = ['schedule','category','group','room','view','search'];
         $raw = is_string($val) ? $val : '';
-        $parts = array_filter(array_map('trim', explode(',', strtolower($raw))));
+        // "event" was retired in 1.9.0; treat it as "schedule".
+        $parts = array_map(function($p){ return $p === 'event' ? 'schedule' : $p; }, array_filter(array_map('trim', explode(',', strtolower($raw)))));
         $out = [];
         foreach ($parts as $p) {
             if (!in_array($p, $allowed, true)) continue;
@@ -435,6 +414,22 @@ add_submenu_page(
 
 
 public static function admin_notices(): void {
+    if (current_user_can('manage_options') && get_option(CS_Plugin::OPT_MIGRATION_NOTICE) === '1') {
+        $r = get_option(CS_Plugin::OPT_MIGRATION_REPORT, []);
+        if (!is_array($r)) $r = [];
+        $moved = (int)($r['workshops_moved'] ?? 0);
+        $created = (int)($r['schedules_created'] ?? 0);
+        $kept = (int)($r['kept_existing'] ?? 0);
+        echo '<div class="notice notice-info is-dismissible"><p><strong>' . esc_html__('Convention Schedule: Schedule Events have been merged into Schedules.', 'convention-schedule') . '</strong> ';
+        echo esc_html(sprintf(
+            /* translators: 1: workshops moved, 2: schedules created, 3: workshops kept on their existing schedule */
+            __('%1$d workshop(s) moved to a Schedule, %2$d Schedule(s) created from Schedule Events, %3$d workshop(s) kept their existing Schedule.', 'convention-schedule'),
+            $moved, $created, $kept
+        ));
+        echo ' ' . esc_html__('Old event="" shortcodes keep working.', 'convention-schedule') . '</p></div>';
+        delete_option(CS_Plugin::OPT_MIGRATION_NOTICE);
+    }
+
     if (!isset($_GET['csched_msg'])) return;
     if (!current_user_can('manage_options')) return;
 
@@ -723,10 +718,10 @@ foreach ($notices as [$type, $msg]) {
 
                             <br><br>
                             <label><strong><?php echo esc_html__('Control Order (Drag & Drop)', 'convention-schedule'); ?></strong></label>
-                            <p class="description"><?php echo esc_html__('Reorder the front-end dropdowns (Event, Category, Group By, Room, View, Search). Apply/Reset buttons stay at the end.', 'convention-schedule'); ?></p>
+                            <p class="description"><?php echo esc_html__('Reorder the front-end dropdowns (Schedule, Category, Group By, Room, View, Search). Apply/Reset buttons stay at the end.', 'convention-schedule'); ?></p>
 
                             <?php
-                            $allowed = ['schedule' => __('Schedule', 'convention-schedule'), 'event' => __('Event', 'convention-schedule'), 'category' => __('Category', 'convention-schedule'), 'group' => __('Group By', 'convention-schedule'), 'room' => __('Room', 'convention-schedule'), 'view' => __('View', 'convention-schedule'), 'search' => __('Search', 'convention-schedule')];
+                            $allowed = ['schedule' => __('Schedule', 'convention-schedule'), 'category' => __('Category', 'convention-schedule'), 'group' => __('Group By', 'convention-schedule'), 'room' => __('Room', 'convention-schedule'), 'view' => __('View', 'convention-schedule'), 'search' => __('Search', 'convention-schedule')];
                             $keys = array_filter(array_map('trim', explode(',', $control_order)));
                             $keys = array_values(array_unique(array_intersect($keys, array_keys($allowed))));
                             foreach (array_keys($allowed) as $k) { if (!in_array($k, $keys, true)) $keys[] = $k; }
@@ -769,11 +764,11 @@ foreach ($notices as [$type, $msg]) {
                 
                 
                 
-                <h2><?php echo esc_html__('Event-specific shortcode examples', 'convention-schedule'); ?></h2>
-                <p><?php echo esc_html__('Create Events under Workshops → Events, assign each workshop to an Event, then place separate shortcodes on separate pages.', 'convention-schedule'); ?></p>
-                <p><code>[convention_schedule event="2026-lrcna"]</code></p>
-                <p><code>[convention_schedule event="2026-lrcna" show_event_filter="0"]</code></p>
-                <p><code>[convention_schedule show_event_filter="1"]</code></p>
+                <h2><?php echo esc_html__('Schedule-specific shortcode examples', 'convention-schedule'); ?></h2>
+                <p><?php echo esc_html__('Create Schedules under Workshops → Schedules, assign each workshop to a Schedule, then place separate shortcodes on separate pages.', 'convention-schedule'); ?></p>
+                <p><code>[convention_schedule schedule="2026-convention"]</code></p>
+                <p><code>[convention_schedule schedule="2026-convention" show_schedule_filter="0"]</code></p>
+                <p><code>[convention_schedule show_schedule_filter="1"]</code></p>
 
 
                 <h2><?php echo esc_html__('Category Color Bars', 'convention-schedule'); ?></h2>
@@ -903,7 +898,7 @@ foreach ($notices as [$type, $msg]) {
             <?php wp_nonce_field('csched_export_workshops_csv'); ?>
             <button type="submit" class="button button-secondary"><?php echo esc_html__('Export Workshops CSV', 'convention-schedule'); ?></button>
         </form>
-        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Exports: id, title, description, date, start, end, room, categories (slugs separated by |).', 'convention-schedule'); ?></p>
+        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Exports: id, title, description, date, start, end, room, categories (slugs separated by |), schedule (slug), previous_day (1/0).', 'convention-schedule'); ?></p>
     </div>
 
     <div style="min-width: 320px;">
@@ -913,7 +908,7 @@ foreach ($notices as [$type, $msg]) {
             <input type="file" name="csched_workshops_csv_file" accept=".csv,text/csv" required>
             <button type="submit" class="button button-secondary"><?php echo esc_html__('Import Workshops CSV', 'convention-schedule'); ?></button>
         </form>
-        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Categories will be created if missing.', 'convention-schedule'); ?></p>
+        <p class="description" style="margin-top:6px;"><?php echo esc_html__('Import creates new workshops; if an existing id is provided, that workshop is updated. Schedules and categories are created if missing. Older CSV files with an "event" column still import: the event slug is used as the schedule.', 'convention-schedule'); ?></p>
     </div>
 </div>
 
@@ -935,7 +930,7 @@ foreach ($notices as [$type, $msg]) {
     // UTF-8 BOM for Excel compatibility
     fprintf($out, chr(0xEF).chr(0xBB).chr(0xBF));
 
-    fputcsv($out, ['id', 'title', 'description', 'date', 'start', 'end', 'room', 'categories', 'event', 'schedule']);
+    fputcsv($out, ['id', 'title', 'description', 'date', 'start', 'end', 'room', 'categories', 'schedule', 'previous_day']);
 
     $q = new WP_Query([
         'post_type' => CS_Plugin::CPT,
@@ -959,15 +954,6 @@ foreach ($notices as [$type, $msg]) {
         }
         $cats = implode('|', $slugs);
 
-        $event_terms = get_the_terms($p->ID, CS_Plugin::EVENT_TAX);
-        $event_slug = '';
-        if (!is_wp_error($event_terms) && !empty($event_terms)) {
-            $event_slug = (string)$event_terms[0]->slug;
-        }
-        if ($event_slug === '') {
-            $event_slug = (string)get_post_meta($p->ID, CS_Plugin::META_EVENT, true);
-        }
-
 
         $schedule_terms = get_the_terms($p->ID, CS_Plugin::SCHEDULE_TAX);
         $schedule_slug = '';
@@ -987,8 +973,8 @@ foreach ($notices as [$type, $msg]) {
             $end,
             $room,
             $cats,
-            $event_slug,
             $schedule_slug,
+            ((string)get_post_meta($p->ID, CS_Plugin::META_PREVIOUS_DAY, true) === '1') ? '1' : '0',
         ]);
     }
 
@@ -1074,6 +1060,8 @@ public static function handle_import_workshops_csv(): void {
 
     // Normalize headers
     $header = array_map(function($h) {
+        // Strip the UTF-8 BOM that our own export writes, so the first column ("id") is recognised.
+        if (is_string($h)) $h = preg_replace('/^\xEF\xBB\xBF/', '', $h);
         $h = is_string($h) ? strtolower(trim($h)) : '';
         return $h;
     }, $header);
@@ -1114,10 +1102,13 @@ public static function handle_import_workshops_csv(): void {
         $start = self::normalize_import_time(sanitize_text_field($get('start')));
         $end   = self::normalize_import_time(sanitize_text_field($get('end')));
         $room  = sanitize_text_field($get('room'));
-        $event_raw = trim($get('event'));
-        $event_slug = sanitize_title($event_raw);
+        // Schedule column. Older exports (1.8.x) also had an "event" column: when the schedule
+        // cell is blank, the event value is used as the schedule.
+        $has_schedule_col = isset($col_index['schedule']) || isset($col_index['event']);
         $schedule_raw = trim($get('schedule'));
+        if ($schedule_raw === '') $schedule_raw = trim($get('event'));
         $schedule_slug = sanitize_title($schedule_raw);
+        $has_previous_day_col = isset($col_index['previous_day']);
         $previous_day = trim($get('previous_day'));
         $previous_day = in_array(strtolower($previous_day), ['1','yes','true','y'], true) ? '1' : '0';
 
@@ -1135,6 +1126,8 @@ public static function handle_import_workshops_csv(): void {
             $existing = get_post((int)$id_raw);
             if ($existing && $existing->post_type === CS_Plugin::CPT) {
                 $postarr['ID'] = (int)$id_raw;
+                // Keep the existing status (drafts stay drafts) when updating.
+                unset($postarr['post_status']);
                 $post_id = wp_update_post($postarr, true);
                 $is_update = true;
             }
@@ -1153,37 +1146,31 @@ public static function handle_import_workshops_csv(): void {
         update_post_meta($post_id, CS_Plugin::META_START, $start);
         update_post_meta($post_id, CS_Plugin::META_END, $end);
         update_post_meta($post_id, CS_Plugin::META_ROOM, $room);
-        update_post_meta($post_id, CS_Plugin::META_EVENT, $event_slug);
-        if ($event_slug !== '') {
-            $event_term = get_term_by('slug', $event_slug, CS_Plugin::EVENT_TAX);
-            if (!$event_term) {
-                $event_name = $event_raw !== '' ? sanitize_text_field($event_raw) : ucwords(str_replace(['-', '_'], ' ', $event_slug));
-                $created_event = wp_insert_term($event_name, CS_Plugin::EVENT_TAX, ['slug' => $event_slug]);
-                if (!is_wp_error($created_event) && !empty($created_event['term_id'])) {
-                    wp_set_object_terms($post_id, [(int)$created_event['term_id']], CS_Plugin::EVENT_TAX, false);
-                }
-            } else {
-                wp_set_object_terms($post_id, [(int)$event_term->term_id], CS_Plugin::EVENT_TAX, false);
-            }
-        } else {
-            wp_set_object_terms($post_id, [], CS_Plugin::EVENT_TAX, false);
+        if ($has_previous_day_col) {
+            update_post_meta($post_id, CS_Plugin::META_PREVIOUS_DAY, $previous_day);
         }
 
-
-        update_post_meta($post_id, CS_Plugin::META_SCHEDULE, $schedule_slug);
-        if ($schedule_slug !== '') {
-            $schedule_term = get_term_by('slug', $schedule_slug, CS_Plugin::SCHEDULE_TAX);
-            if (!$schedule_term) {
-                $schedule_name = $schedule_raw !== '' ? sanitize_text_field($schedule_raw) : ucwords(str_replace(['-', '_'], ' ', $schedule_slug));
-                $created_schedule = wp_insert_term($schedule_name, CS_Plugin::SCHEDULE_TAX, ['slug' => $schedule_slug]);
-                if (!is_wp_error($created_schedule) && !empty($created_schedule['term_id'])) {
-                    wp_set_object_terms($post_id, [(int)$created_schedule['term_id']], CS_Plugin::SCHEDULE_TAX, false);
+        // Only touch the schedule when the file has a schedule (or legacy event) column,
+        // so a CSV without one does not wipe existing assignments on update.
+        if ($has_schedule_col) {
+            update_post_meta($post_id, CS_Plugin::META_SCHEDULE, $schedule_slug);
+            if ($schedule_slug !== '') {
+                $schedule_term = get_term_by('slug', $schedule_slug, CS_Plugin::SCHEDULE_TAX);
+                if (!$schedule_term) {
+                    // A bare slug ("spring-gathering") becomes a readable name ("Spring Gathering").
+                    $schedule_name = ($schedule_raw !== '' && $schedule_raw !== $schedule_slug)
+                        ? sanitize_text_field($schedule_raw)
+                        : ucwords(str_replace(['-', '_'], ' ', $schedule_slug));
+                    $created_schedule = wp_insert_term($schedule_name, CS_Plugin::SCHEDULE_TAX, ['slug' => $schedule_slug]);
+                    if (!is_wp_error($created_schedule) && !empty($created_schedule['term_id'])) {
+                        wp_set_object_terms($post_id, [(int)$created_schedule['term_id']], CS_Plugin::SCHEDULE_TAX, false);
+                    }
+                } else {
+                    wp_set_object_terms($post_id, [(int)$schedule_term->term_id], CS_Plugin::SCHEDULE_TAX, false);
                 }
             } else {
-                wp_set_object_terms($post_id, [(int)$schedule_term->term_id], CS_Plugin::SCHEDULE_TAX, false);
+                wp_set_object_terms($post_id, [], CS_Plugin::SCHEDULE_TAX, false);
             }
-        } else {
-            wp_set_object_terms($post_id, [], CS_Plugin::SCHEDULE_TAX, false);
         }
 
         // Categories: slugs separated by |
@@ -1250,18 +1237,30 @@ public static function render_setup_usage_page(): void {
             </style>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('1. Basic Setup', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('1. How Workshops Are Organized', 'convention-schedule'); ?></h2>
+                <table class="widefat striped">
+                    <tbody>
+                        <tr><td style="width:180px;"><strong><?php echo esc_html__('Schedules', 'convention-schedule'); ?></strong></td><td><?php echo esc_html__('One per convention or workshop schedule, for example 2026 Convention or Service Workshops. Each workshop belongs to one schedule, and each schedule can have its own page.', 'convention-schedule'); ?></td></tr>
+                        <tr><td><strong><?php echo esc_html__('Workshops', 'convention-schedule'); ?></strong></td><td><?php echo esc_html__('The individual sessions, each with a date, start/end time, room, and description.', 'convention-schedule'); ?></td></tr>
+                        <tr><td><strong><?php echo esc_html__('Categories', 'convention-schedule'); ?></strong></td><td><?php echo esc_html__('Classify workshops (Main Meeting, Workshop, Meal, Entertainment, Service). Categories drive the filter dropdown and color bars.', 'convention-schedule'); ?></td></tr>
+                    </tbody>
+                </table>
+                <div class="csched-note"><?php echo esc_html__('Schedule Events were merged into Schedules in version 1.9.0. Existing event assignments were moved to a schedule with the same slug, so old event="" shortcodes still show the same workshops.', 'convention-schedule'); ?></div>
+            </div>
+
+            <div class="csched-help-card">
+                <h2><?php echo esc_html__('2. Basic Setup', 'convention-schedule'); ?></h2>
                 <ol>
-                    <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Schedules</strong> and create at least one schedule if the site will have multiple independent schedules.', 'convention-schedule')); ?></li>
+                    <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Schedules</strong> and create a schedule for each convention or workshop schedule.', 'convention-schedule')); ?></li>
                     <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Schedule Categories</strong> and create categories such as Main Meeting, Workshop, Meal, Entertainment, or Service.', 'convention-schedule')); ?></li>
                     <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Settings</strong> to configure layout, time format, controls, category colors, saved rooms, and table category bar width.', 'convention-schedule')); ?></li>
-                    <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Add Workshop</strong>, enter the date/time, room, schedule, event/category, and publish.', 'convention-schedule')); ?></li>
+                    <li><?php echo wp_kses_post(__('Go to <strong>Workshops → Add Workshop</strong>, enter the date/time and room, choose its schedule and categories, and publish.', 'convention-schedule')); ?></li>
                     <li><?php echo wp_kses_post(__('Create a WordPress page and add the schedule shortcode using a Shortcode block or Elementor Shortcode widget.', 'convention-schedule')); ?></li>
                 </ol>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('2. Multiple Schedules on One Website', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('3. Multiple Schedules on One Website', 'convention-schedule'); ?></h2>
                 <p><?php echo esc_html__('Schedules are independent sets of workshops. This is useful when one website hosts more than one convention, conference, retreat, track, or yearly event.', 'convention-schedule'); ?></p>
                 <p><strong><?php echo esc_html__('Example:', 'convention-schedule'); ?></strong></p>
                 <ul>
@@ -1276,7 +1275,7 @@ public static function render_setup_usage_page(): void {
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('3. Common Use Cases', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('4. Common Use Cases', 'convention-schedule'); ?></h2>
                 <table class="widefat striped">
                     <thead><tr><th><?php echo esc_html__('Use Case', 'convention-schedule'); ?></th><th><?php echo esc_html__('Recommended Shortcode', 'convention-schedule'); ?></th></tr></thead>
                     <tbody>
@@ -1293,15 +1292,13 @@ public static function render_setup_usage_page(): void {
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('4. Shortcode Reference', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('5. Shortcode Reference', 'convention-schedule'); ?></h2>
                 <p><code>[convention_schedule]</code></p>
                 <table class="widefat striped">
                     <thead><tr><th><?php echo esc_html__('Attribute', 'convention-schedule'); ?></th><th><?php echo esc_html__('Values / Purpose', 'convention-schedule'); ?></th></tr></thead>
                     <tbody>
                         <tr><td><code>schedule</code></td><td><?php echo esc_html__('Schedule slug, for example 2026-convention', 'convention-schedule'); ?></td></tr>
                         <tr><td><code>show_schedule_filter</code></td><td><code>1</code> / <code>0</code></td></tr>
-                        <tr><td><code>event</code></td><td><?php echo esc_html__('Event slug filter', 'convention-schedule'); ?></td></tr>
-                        <tr><td><code>show_event_filter</code></td><td><code>1</code> / <code>0</code></td></tr>
                         <tr><td><code>layout</code></td><td><code>table</code>, <code>cards</code>, <code>grid</code></td></tr>
                         <tr><td><code>heading</code></td><td><?php echo esc_html__('Override the schedule heading', 'convention-schedule'); ?></td></tr>
                         <tr><td><code>show_heading</code></td><td><code>1</code> / <code>0</code></td></tr>
@@ -1318,33 +1315,34 @@ public static function render_setup_usage_page(): void {
                         <tr><td><code>order</code></td><td><code>ASC</code> / <code>DESC</code></td></tr>
                     </tbody>
                 </table>
+                <p class="description"><?php echo wp_kses_post(__('Older shortcodes still work: <code>event="slug"</code> behaves like <code>schedule="slug"</code>, and <code>show_event_filter="1"</code> shows the Schedule dropdown. New pages should use <code>schedule</code> and <code>show_schedule_filter</code>.', 'convention-schedule')); ?></p>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('5. After-Midnight Workshops', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('6. After-Midnight Workshops', 'convention-schedule'); ?></h2>
                 <p><?php echo wp_kses_post(__('For an individual after-midnight workshop that should appear under the prior convention day, edit that workshop and check <strong>Display this workshop on the previous schedule day</strong>.', 'convention-schedule')); ?></p>
                 <p><?php echo esc_html__('Leave it unchecked when the workshop should remain on its actual calendar date.', 'convention-schedule'); ?></p>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('6. Rooms and Combined Rooms', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('7. Rooms and Combined Rooms', 'convention-schedule'); ?></h2>
                 <p><?php echo wp_kses_post(__('Saved rooms are managed in <strong>Workshops → Settings → Saved Rooms</strong> and appear in the Add/Edit Workshop room selector.', 'convention-schedule')); ?></p>
                 <p><?php echo esc_html__('Numbered rooms such as Aspen 1 and Aspen 2 remain distinct. Combined labels such as Aspen or Aspen 1 & 2 can represent both numbered rooms in grid/filter logic.', 'convention-schedule'); ?></p>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('7. Category Colors', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('8. Category Colors', 'convention-schedule'); ?></h2>
                 <p><?php echo wp_kses_post(__('Assign category colors under <strong>Workshops → Settings → Category Color Bars</strong>. Cards and grid use full-width bars; table bar width can be set independently.', 'convention-schedule')); ?></p>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('8. CSV Import / Export', 'convention-schedule'); ?></h2>
-                <p><?php echo esc_html__('Use the CSV tools in Settings to move or bulk-edit workshops. Current exports include workshop ID, title, description, date, start/end time, room, categories, event, schedule, and previous-day flag.', 'convention-schedule'); ?></p>
-                <p><?php echo esc_html__('Use schedule slugs in the schedule column. Missing schedules/categories can be created during import when supported by the import routine.', 'convention-schedule'); ?></p>
+                <h2><?php echo esc_html__('9. CSV Import / Export', 'convention-schedule'); ?></h2>
+                <p><?php echo esc_html__('Use the CSV tools in Settings to move or bulk-edit workshops. Exports include workshop ID, title, description, date, start/end time, room, categories, schedule, and previous-day flag.', 'convention-schedule'); ?></p>
+                <p><?php echo esc_html__('Use schedule slugs in the schedule column and category slugs separated by | in the categories column. Missing schedules and categories are created during import. CSV files exported from older versions still import: a value in the old event column is used as the schedule when the schedule cell is blank.', 'convention-schedule'); ?></p>
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('9. Elementor / WordPress Placement', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('10. Elementor / WordPress Placement', 'convention-schedule'); ?></h2>
                 <ul>
                     <li><?php echo wp_kses_post(__('Elementor: use the <strong>Shortcode</strong> widget.', 'convention-schedule')); ?></li>
                     <li><?php echo wp_kses_post(__('Block Editor: use the <strong>Shortcode</strong> block.', 'convention-schedule')); ?></li>
@@ -1354,7 +1352,7 @@ public static function render_setup_usage_page(): void {
             </div>
 
             <div class="csched-help-card">
-                <h2><?php echo esc_html__('10. Troubleshooting', 'convention-schedule'); ?></h2>
+                <h2><?php echo esc_html__('11. Troubleshooting', 'convention-schedule'); ?></h2>
                 <ul>
                     <li><?php echo esc_html__('Shortcode appears as text: use a Shortcode block/widget and confirm the plugin is active.', 'convention-schedule'); ?></li>
                     <li><?php echo esc_html__('No workshops display: confirm they are published and assigned to the schedule/category being filtered.', 'convention-schedule'); ?></li>

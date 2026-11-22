@@ -49,8 +49,16 @@ class CS_Plugin {
     const OPT_SAVED_ROOMS = 'csched_saved_rooms'; // newline separated room list
     const OPT_CATEGORY_COLORS = 'csched_category_colors'; // slug=>hex map
     const OPT_TABLE_BAR_WIDTH = 'csched_table_bar_width'; // percent
+    // Migration bookkeeping
+    const OPT_DB_VERSION = 'csched_db_version';
+    const OPT_MIGRATION_REPORT = 'csched_events_migration_report';
+    const OPT_MIGRATION_NOTICE = 'csched_events_migration_notice'; // 1 = show admin notice once
+    const DB_VERSION = '1.9.0';
+
     public static function init(): void {
         add_action('init', [__CLASS__, 'register_cpt_and_tax']);
+        // Runs after taxonomies are registered (priority 10) so term functions work.
+        add_action('init', [__CLASS__, 'maybe_migrate'], 20);
         add_action('wp_head', [__CLASS__, 'output_custom_css'], 50);
         add_action('wp_head', [__CLASS__, 'output_base_css'], 49);
 
@@ -64,6 +72,10 @@ class CS_Plugin {
     public static function activate(): void {
         self::register_cpt_and_tax();
         flush_rewrite_rules();
+
+        // Always (re)run on activation. The migration is idempotent.
+        self::migrate_events_to_schedules();
+        update_option(self::OPT_DB_VERSION, self::DB_VERSION);
 
         // Initialize defaults
         if (get_option(self::OPT_CSS, null) === null) update_option(self::OPT_CSS, self::default_css());
@@ -117,20 +129,25 @@ class CS_Plugin {
             'rewrite' => false,
         ]);
 
+        // Legacy "Schedule Events" taxonomy (retired in 1.9.0).
+        // Still registered, but hidden everywhere, so existing data stays readable for the
+        // one-time migration into Schedules and for old event="" shortcodes.
         register_taxonomy(self::EVENT_TAX, [self::CPT], [
             'labels' => [
-                'name' => __('Schedule Events', 'convention-schedule'),
-                'singular_name' => __('Schedule Event', 'convention-schedule'),
-                'add_new_item' => __('Add New Schedule Event', 'convention-schedule'),
-                'edit_item' => __('Edit Schedule Event', 'convention-schedule'),
-                'search_items' => __('Search Schedule Events', 'convention-schedule'),
+                'name' => __('Schedule Events (legacy)', 'convention-schedule'),
+                'singular_name' => __('Schedule Event (legacy)', 'convention-schedule'),
             ],
             'public' => false,
-            'show_ui' => true,
-            'show_in_menu' => 'edit.php?post_type=' . self::CPT,
+            'show_ui' => false,
+            'show_in_menu' => false,
+            'show_in_nav_menus' => false,
+            'show_in_rest' => false,
+            'show_tagcloud' => false,
+            'show_in_quick_edit' => false,
+            'show_admin_column' => false,
             'hierarchical' => false,
-            'show_admin_column' => true,
             'rewrite' => false,
+            'query_var' => false,
         ]);
 
         register_taxonomy(self::TAX, [self::CPT], [
@@ -165,6 +182,133 @@ class CS_Plugin {
             'has_archive' => false,
             'rewrite' => false,
         ]);
+    }
+
+    /**
+     * Run pending data migrations once per DB version (covers plugin updates, which do not
+     * fire the activation hook).
+     */
+    public static function maybe_migrate(): void {
+        $current = (string) get_option(self::OPT_DB_VERSION, '');
+        if ($current !== '' && version_compare($current, self::DB_VERSION, '>=')) return;
+
+        self::migrate_events_to_schedules();
+        update_option(self::OPT_DB_VERSION, self::DB_VERSION);
+    }
+
+    /**
+     * Move Schedule Event assignments into Schedules.
+     *
+     * Safe to run any number of times:
+     * - A workshop that already has a Schedule (term or saved slug) is never changed.
+     * - A workshop with no Schedule but with a Schedule Event is assigned to the Schedule with
+     *   the same slug. That Schedule is created (copying the event's name and description) only
+     *   if it does not exist yet; an existing Schedule with that slug is reused.
+     * - Legacy event terms and the _csched_event meta are left in place, never deleted.
+     *
+     * @return array{workshops_moved:int, schedules_created:int, kept_existing:int, ran_at:string}
+     */
+    public static function migrate_events_to_schedules(): array {
+        $report = [
+            'workshops_moved' => 0,
+            'schedules_created' => 0,
+            'kept_existing' => 0,
+            'ran_at' => gmdate('c'),
+        ];
+
+        if (!taxonomy_exists(self::EVENT_TAX) || !taxonomy_exists(self::SCHEDULE_TAX)) {
+            return $report;
+        }
+
+        $ids = get_posts([
+            'post_type' => self::CPT,
+            'post_status' => 'any',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'no_found_rows' => true,
+            'suppress_filters' => true,
+        ]);
+
+        foreach ((array) $ids as $post_id) {
+            $post_id = (int) $post_id;
+
+            // Legacy event: taxonomy term first, saved slug as fallback.
+            $event_slug = '';
+            $event_term = null;
+            $event_terms = wp_get_object_terms($post_id, self::EVENT_TAX);
+            if (!is_wp_error($event_terms) && !empty($event_terms)) {
+                $event_term = $event_terms[0];
+                $event_slug = (string) $event_term->slug;
+            }
+            if ($event_slug === '') {
+                // Saved slug is only trusted while that event still exists; a slug left behind
+                // by a deleted event must not be resurrected as a new schedule.
+                $meta_slug = sanitize_title((string) get_post_meta($post_id, self::META_EVENT, true));
+                if ($meta_slug !== '') {
+                    $maybe = get_term_by('slug', $meta_slug, self::EVENT_TAX);
+                    if ($maybe) {
+                        $event_term = $maybe;
+                        $event_slug = $meta_slug;
+                    }
+                }
+            }
+            if ($event_slug === '') continue;
+
+            // Existing schedule wins.
+            $schedule_slugs = wp_get_object_terms($post_id, self::SCHEDULE_TAX, ['fields' => 'slugs']);
+            $has_schedule_term = !is_wp_error($schedule_slugs) && !empty($schedule_slugs);
+            $schedule_meta = (string) get_post_meta($post_id, self::META_SCHEDULE, true);
+            if ($has_schedule_term || $schedule_meta !== '') {
+                $current = $has_schedule_term ? (string) $schedule_slugs[0] : $schedule_meta;
+                if ($current !== $event_slug) $report['kept_existing']++;
+                continue;
+            }
+
+            // Find or create the matching schedule.
+            $schedule_term = get_term_by('slug', $event_slug, self::SCHEDULE_TAX);
+            if (!$schedule_term) {
+                $name = $event_term ? (string) $event_term->name : ucwords(str_replace(['-', '_'], ' ', $event_slug));
+                $desc = $event_term ? (string) $event_term->description : '';
+                $created = wp_insert_term($name, self::SCHEDULE_TAX, ['slug' => $event_slug, 'description' => $desc]);
+                if (is_wp_error($created)) {
+                    // A schedule with the same name but a different slug blocks creation; reuse it.
+                    $existing_id = $created->get_error_data('term_exists');
+                    $schedule_term = $existing_id ? get_term((int) $existing_id, self::SCHEDULE_TAX) : null;
+                    if (!$schedule_term || is_wp_error($schedule_term)) continue;
+                } else {
+                    $schedule_term = get_term((int) $created['term_id'], self::SCHEDULE_TAX);
+                    if (!$schedule_term || is_wp_error($schedule_term)) continue;
+                    $report['schedules_created']++;
+                }
+            }
+
+            $set = wp_set_object_terms($post_id, [(int) $schedule_term->term_id], self::SCHEDULE_TAX, false);
+            if (is_wp_error($set)) continue;
+            update_post_meta($post_id, self::META_SCHEDULE, (string) $schedule_term->slug);
+            $report['workshops_moved']++;
+        }
+
+        // Saved control order: "event" is no longer a control; it becomes "schedule".
+        $order = (string) get_option(self::OPT_CONTROL_ORDER, '');
+        if ($order !== '') {
+            $parts = array_values(array_filter(array_map('trim', explode(',', strtolower($order)))));
+            if (in_array('event', $parts, true)) {
+                $out = [];
+                foreach ($parts as $p) {
+                    if ($p === 'event') $p = 'schedule';
+                    if (!in_array($p, $out, true)) $out[] = $p;
+                }
+                update_option(self::OPT_CONTROL_ORDER, implode(',', $out));
+            }
+        }
+
+        update_option(self::OPT_MIGRATION_REPORT, $report, false);
+        // Only announce runs that actually changed something (re-runs stay quiet).
+        if ($report['workshops_moved'] > 0 || $report['schedules_created'] > 0) {
+            update_option(self::OPT_MIGRATION_NOTICE, '1', false);
+        }
+
+        return $report;
     }
 
     public static function output_base_css(): void {

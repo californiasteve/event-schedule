@@ -174,8 +174,7 @@ public static function get_rooms_for_filters(): array {
 private static function render_controls(
         string $selected_schedule,
         bool $show_schedule_filter,
-        string $selected_event,
-        bool $show_event_filter,
+        string $display_schedule,
         string $selected_cat,
         string $selected_group,
         string $selected_room,
@@ -202,18 +201,13 @@ $terms = get_terms([
         ]);
         if (is_wp_error($schedule_terms)) $schedule_terms = [];
 
-        $event_terms = get_terms([
-            'taxonomy' => CS_Plugin::EVENT_TAX,
-            'hide_empty' => false,
-        ]);
-        if (is_wp_error($event_terms)) $event_terms = [];
-
         $rooms = self::get_rooms();
         $base_url = remove_query_arg(['csched_schedule', 'csched_event', 'csched_cat', 'csched_group', 'csched_room', 'csched_view', 'csched_q']);
 
         // Control order: comma-separated keys stored in settings.
-        $allowed = ['schedule', 'event', 'category', 'group', 'room', 'view', 'search'];
-        $order = array_filter(array_map('trim', explode(',', strtolower((string)$control_order_csv))));
+        $allowed = ['schedule', 'category', 'group', 'room', 'view', 'search'];
+        // "event" (retired in 1.9.0) maps to "schedule" for older saved control orders.
+        $order = array_map(function($k){ return $k === 'event' ? 'schedule' : $k; }, array_filter(array_map('trim', explode(',', strtolower((string)$control_order_csv)))));
         $order = array_values(array_unique(array_intersect($order, $allowed)));
         foreach ($allowed as $k) {
             if (!in_array($k, $order, true)) $order[] = $k;
@@ -233,7 +227,6 @@ $terms = get_terms([
 .csched-control{height:var(--csched-control-height,40px);border:1px solid #c9c9c9;border-radius:var(--csched-control-radius,8px);background:#fff;padding:8px 10px;width:100%;}
 .csched-input{height:var(--csched-control-height,40px);border:1px solid #c9c9c9;border-radius:var(--csched-control-radius,8px);background:#fff;padding:8px 10px;width:100%;box-sizing:border-box;}
 .csched-controls .csched-schedule-filter{width:var(--csched-dd-width-schedule,18%);}
-.csched-controls .csched-event-filter{width:var(--csched-dd-width-event,18%);}
 .csched-controls .csched-cat{width:var(--csched-dd-width-cat,15%);}
 .csched-controls .csched-group{width:var(--csched-dd-width-group,15%);}
 .csched-controls .csched-room{width:var(--csched-dd-width-room,15%);}
@@ -259,17 +252,6 @@ $terms = get_terms([
                             <span class="csched-label" id="csched_lbl_schedule_preview"><?php echo esc_html__('Schedule', 'convention-schedule'); ?></span>
                             <select id="csched_schedule_preview" class="csched-control" disabled aria-label="<?php echo esc_attr__('Schedule', 'convention-schedule'); ?>" aria-labelledby="csched_lbl_schedule_preview">
                                 <option><?php echo esc_html__('All Schedules', 'convention-schedule'); ?></option>
-                            </select>
-                        </div>
-                    <?php };
-                }
-
-                if ($show_event_filter) {
-                    $preview['event'] = function(){ ?>
-                        <div class="csched-field csched-event-filter">
-                            <span class="csched-label" id="csched_lbl_event_preview"><?php echo esc_html__('Event', 'convention-schedule'); ?></span>
-                            <select id="csched_event_preview" class="csched-control" disabled aria-label="<?php echo esc_attr__('Event', 'convention-schedule'); ?>" aria-labelledby="csched_lbl_event_preview">
-                                <option><?php echo esc_html__('All Events', 'convention-schedule'); ?></option>
                             </select>
                         </div>
                     <?php };
@@ -362,35 +344,22 @@ $terms = get_terms([
 
                 $controls = [];
                 if ($show_schedule_filter) {
-                    $controls['schedule'] = function() use ($schedule_terms, $selected_schedule) { ?>
+                    $controls['schedule'] = function() use ($schedule_terms, $display_schedule) { ?>
                         <div class="csched-field csched-schedule-filter">
                             <span class="csched-label" id="csched_lbl_schedule"><?php echo esc_html__('Schedule', 'convention-schedule'); ?></span>
                             <select id="csched_schedule" class="csched-control" name="csched_schedule" aria-label="<?php echo esc_attr__('Schedule', 'convention-schedule'); ?>" aria-labelledby="csched_lbl_schedule">
                                 <option value=""><?php echo esc_html__('All Schedules', 'convention-schedule'); ?></option>
                                 <?php foreach ($schedule_terms as $t): ?>
-                                    <option value="<?php echo esc_attr($t->slug); ?>" <?php selected($selected_schedule, $t->slug); ?>><?php echo esc_html($t->name); ?></option>
+                                    <option value="<?php echo esc_attr($t->slug); ?>" <?php selected($display_schedule, $t->slug); ?>><?php echo esc_html($t->name); ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
                     <?php };
                 } elseif ($selected_schedule !== '') {
                     echo '<input type="hidden" name="csched_schedule" value="' . esc_attr($selected_schedule) . '">';
-                }
-
-                if ($show_event_filter) {
-                    $controls['event'] = function() use ($event_terms, $selected_event) { ?>
-                        <div class="csched-field csched-event-filter">
-                            <span class="csched-label" id="csched_lbl_event"><?php echo esc_html__('Event', 'convention-schedule'); ?></span>
-                            <select id="csched_event" class="csched-control" name="csched_event" aria-label="<?php echo esc_attr__('Event', 'convention-schedule'); ?>" aria-labelledby="csched_lbl_event">
-                                <option value=""><?php echo esc_html__('All Events', 'convention-schedule'); ?></option>
-                                <?php foreach ($event_terms as $t): ?>
-                                    <option value="<?php echo esc_attr($t->slug); ?>" <?php selected($selected_event, $t->slug); ?>><?php echo esc_html($t->name); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                    <?php };
-                } elseif ($selected_event !== '') {
-                    echo '<input type="hidden" name="csched_event" value="' . esc_attr($selected_event) . '">';
+                } elseif ($display_schedule !== '') {
+                    // Legacy event filter in effect: keep it when other filters are applied.
+                    echo '<input type="hidden" name="csched_event" value="' . esc_attr($display_schedule) . '">';
                 }
 
                 $controls['category'] = function() use ($terms, $selected_cat) { ?>
@@ -532,8 +501,8 @@ public static function render_schedule($atts): string {
         $atts = shortcode_atts([
             'schedule' => '',
             'show_schedule_filter' => '',
-            'event' => '',
-            'show_event_filter' => '',
+            'event' => '',             // legacy (pre-1.9.0): treated as schedule
+            'show_event_filter' => '', // legacy (pre-1.9.0): shows the Schedule dropdown
             'scroll_current' => '',
             'past_grace' => '',
             'layout' => '',
@@ -589,9 +558,10 @@ public static function render_schedule($atts): string {
             ? ($atts['show_schedule_filter'] === '1')
             : false;
 
-        $show_event_filter = $atts['show_event_filter'] !== ''
-            ? ($atts['show_event_filter'] === '1')
-            : false;
+        // Legacy show_event_filter="1" now shows the Schedule dropdown (unless show_schedule_filter is set explicitly).
+        if ($atts['show_schedule_filter'] === '' && $atts['show_event_filter'] === '1') {
+            $show_schedule_filter = true;
+        }
 $control_order_csv = (string) get_option(CS_Plugin::OPT_CONTROL_ORDER, 'category,group,room,view');
 
         
@@ -599,12 +569,6 @@ $control_order_csv = (string) get_option(CS_Plugin::OPT_CONTROL_ORDER, 'category
         if ($show_schedule_filter && strpos(',' . $control_order_csv . ',', ',schedule,') === false) {
             $control_order_csv = rtrim($control_order_csv, ", ");
             $control_order_csv = $control_order_csv ? ('schedule,' . $control_order_csv) : 'schedule';
-        }
-
-        // Ensure the Event control can render when enabled.
-        if ($show_event_filter && strpos(',' . $control_order_csv . ',', ',event,') === false) {
-            $control_order_csv = rtrim($control_order_csv, ", ");
-            $control_order_csv = $control_order_csv ? ('event,' . $control_order_csv) : 'event';
         }
 
         // Ensure the Search control can render even if older saved control order doesn't include it.
@@ -631,7 +595,7 @@ $time_fmt = sanitize_text_field($atts['time_format']);
 
         // Determine requested filters from URL first (when controls enabled)
         $selected_schedule = '';
-        $selected_event = '';
+        $legacy_event = '';
         $selected_cat = '';
         $selected_group = '';
         $selected_room = '';
@@ -640,7 +604,10 @@ $time_fmt = sanitize_text_field($atts['time_format']);
 
         if ($show_controls) {
             $selected_schedule = isset($_GET['csched_schedule']) ? sanitize_title(wp_unslash((string)$_GET['csched_schedule'])) : '';
-            $selected_event = isset($_GET['csched_event']) ? sanitize_title(wp_unslash((string)$_GET['csched_event'])) : '';
+            // Old links with ?csched_event= still work (only when no schedule was chosen).
+            if ($selected_schedule === '' && isset($_GET['csched_event'])) {
+                $legacy_event = sanitize_title(wp_unslash((string)$_GET['csched_event']));
+            }
             $selected_cat = isset($_GET['csched_cat']) ? sanitize_text_field((string)$_GET['csched_cat']) : '';
             $selected_group = isset($_GET['csched_group']) ? sanitize_text_field((string)$_GET['csched_group']) : '';
             $selected_room = isset($_GET['csched_room']) ? sanitize_text_field((string)$_GET['csched_room']) : '';
@@ -664,8 +631,14 @@ $time_fmt = sanitize_text_field($atts['time_format']);
         }
 
         // Allow shortcode defaults to apply if no URL selection
-        if ($selected_schedule === '') $selected_schedule = sanitize_title($atts['schedule']);
-        if ($selected_event === '') $selected_event = sanitize_title($atts['event']);
+        if ($selected_schedule === '' && $legacy_event === '') {
+            $selected_schedule = sanitize_title($atts['schedule']);
+            // Legacy event="" attribute. Applied only as the page default, so a visitor's
+            // schedule choice from the dropdown replaces it.
+            $legacy_event = sanitize_title($atts['event']);
+        }
+        // Value to pre-select in the Schedule dropdown.
+        $display_schedule = $selected_schedule !== '' ? $selected_schedule : $legacy_event;
         if ($selected_cat === '') $selected_cat = sanitize_text_field($atts['category']);
         if ($selected_room === '') $selected_room = sanitize_text_field($atts['room']);
 
@@ -696,11 +669,22 @@ $time_fmt = sanitize_text_field($atts['time_format']);
             ];
         }
 
-        if ($selected_event !== '') {
+        if ($legacy_event !== '') {
+            // Match the schedule migrated from this event, plus any workshop still tagged with
+            // the legacy event (e.g. one that kept a different schedule during migration),
+            // so old event="" pages keep showing exactly the same workshops.
             $tax_query[] = [
-                'taxonomy' => CS_Plugin::EVENT_TAX,
-                'field' => 'slug',
-                'terms' => $selected_event,
+                'relation' => 'OR',
+                [
+                    'taxonomy' => CS_Plugin::SCHEDULE_TAX,
+                    'field' => 'slug',
+                    'terms' => $legacy_event,
+                ],
+                [
+                    'taxonomy' => CS_Plugin::EVENT_TAX,
+                    'field' => 'slug',
+                    'terms' => $legacy_event,
+                ],
             ];
         }
 
@@ -831,7 +815,7 @@ $time_fmt = sanitize_text_field($atts['time_format']);
             <?php endif; ?>
 
             <?php if ($show_controls): ?>
-                <?php echo self::render_controls($selected_schedule, $show_schedule_filter, $selected_event, $show_event_filter, $selected_cat, $group_by, $selected_room, $selected_view, $show_group_by_select, $show_view_switcher, $show_reset, $show_search, $search_q, $control_order_csv, $is_elementor); ?>
+                <?php echo self::render_controls($selected_schedule, $show_schedule_filter, $display_schedule, $selected_cat, $group_by, $selected_room, $selected_view, $show_group_by_select, $show_view_switcher, $show_reset, $show_search, $search_q, $control_order_csv, $is_elementor); ?>
             <?php endif; ?>
 
             <?php if ($layout === 'cards'): ?>
